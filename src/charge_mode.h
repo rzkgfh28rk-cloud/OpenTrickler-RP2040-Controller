@@ -44,8 +44,32 @@ typedef struct {
 
 } eeprom_charge_mode_data_t;
 
+// Precision de charge (tolerances LED, complement automatique, apprentissage)
+// Stocke dans un bloc EEPROM separe pour ne pas effacer les reglages Charge Mode existants
+typedef struct {
+    uint16_t charge_tuning_data_rev;     // Doit rester a 0 (validation par CRC32)
+
+    // Tolerances (en unite de la balance, grains en general)
+    float tolerance_over;                // Ecart max au-dessus de la cible pour rester "vert"
+    float tolerance_under;               // Ecart max en dessous de la cible pour rester "vert"
+
+    // Complement automatique
+    bool topup_enable;
+    uint32_t topup_max_attempts;
+    float topup_speed_rps;               // 0 = vitesse min du trickler fin du profil
+    uint32_t topup_min_pulse_ms;
+    uint32_t topup_max_pulse_ms;
+    uint32_t settle_timeout_ms;          // Temps max d'attente de stabilisation de la balance
+
+    // Apprentissage du point d'arret
+    bool learning_enable;
+    float aim_bias;                      // On vise volontairement un peu sous la cible
+    float learning_max_offset;           // Limite haute du point d'arret appris
+} eeprom_charge_tuning_data_t;
+
 typedef struct {
     eeprom_charge_mode_data_t eeprom_charge_mode_data;
+    eeprom_charge_tuning_data_t eeprom_charge_tuning_data;
     float target_charge_weight;
     uint32_t charge_mode_event;
     charge_mode_state_t charge_mode_state;
@@ -65,6 +89,9 @@ bool charge_mode_config_save(void);
 // REST interface
 bool http_rest_charge_mode_config(struct fs_file *file, int num_params, char *params[], char *values[]);
 bool http_rest_charge_mode_state(struct fs_file *file, int num_params, char *params[], char *values[]);
+bool http_rest_charge_tuning_config(struct fs_file *file, int num_params, char *params[], char *values[]);
+bool http_rest_charge_history(struct fs_file *file, int num_params, char *params[], char *values[]);
+bool charge_tuning_config_save(void);
 
 
 #ifdef __cplusplus

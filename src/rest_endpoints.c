@@ -85,6 +85,8 @@ bool rest_endpoints_init(bool default_wizard) {
     rest_register_handler("/rest/scale_config", http_rest_scale_config);
     rest_register_handler("/rest/charge_mode_config", http_rest_charge_mode_config);
     rest_register_handler("/rest/charge_mode_state", http_rest_charge_mode_state);
+    rest_register_handler("/rest/charge_tuning_config", http_rest_charge_tuning_config);
+    rest_register_handler("/rest/charge_history", http_rest_charge_history);
     rest_register_handler("/rest/cleanup_mode_state", http_rest_cleanup_mode_state);
     rest_register_handler("/rest/system_control", http_rest_system_control);
     rest_register_handler("/rest/coarse_motor_config", http_rest_coarse_motor_config);

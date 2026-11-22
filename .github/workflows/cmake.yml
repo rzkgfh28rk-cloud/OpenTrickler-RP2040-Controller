@@ -5,7 +5,7 @@ run-name: Build based on ${{ github.ref }} by @${{ github.actor }}
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "perso-v1.20" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:

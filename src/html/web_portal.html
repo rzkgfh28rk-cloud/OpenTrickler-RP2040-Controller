@@ -367,6 +367,128 @@
                         </form>
                     </section>
 
+                    <!-- Charge Precision Settings (tolerances, top-up, learning) -->
+                    <section class="settings-page" id="settings-charge-precision" name="Charge Precision" style="display: none;">
+                        <form id="chargeTuningConfigForm" action="/rest/charge_tuning_config" class="grid grid-cols-1 gap-3">
+                            <div class="divider">LED Tolerance</div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Upper Tolerance (+)</span>
+                                <input type="number" class="input input-bordered" name="t0" step="0.001" min="0">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Lower Tolerance (-)</span>
+                                <input type="number" class="input input-bordered" name="t1" step="0.001" min="0">
+                            </div>
+
+                            <div class="divider">Automatic Top-up</div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Enable Automatic Top-up</span>
+                                <select class="select select-bordered" name="t2">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Max Top-up Attempts</span>
+                                <input type="number" class="input input-bordered" name="t3" step="1" min="0" max="50">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Top-up Speed (rps, 0 = profile min)</span>
+                                <input type="number" class="input input-bordered" name="t4" step="0.001" min="0">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Min Top-up Pulse (ms)</span>
+                                <input type="number" class="input input-bordered" name="t5" step="10" min="10">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Max Top-up Pulse (ms)</span>
+                                <input type="number" class="input input-bordered" name="t6" step="10" min="10">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Scale Settle Timeout (ms)</span>
+                                <input type="number" class="input input-bordered" name="t7" step="100" min="1000">
+                            </div>
+
+                            <div class="divider">Stop Point Learning</div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Enable Stop Point Learning</span>
+                                <select class="select select-bordered" name="t8">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Aim Bias (below target)</span>
+                                <input type="number" class="input input-bordered" name="t9" step="0.001">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Max Learned Stop Offset</span>
+                                <input type="number" class="input input-bordered" name="t10" step="0.001" min="0">
+                            </div>
+
+                            <button class="btn btn-neutral settings-apply-btn">Apply</button>
+                        </form>
+                    </section>
+
+                    <!-- Charge History -->
+                    <section class="settings-page" id="settings-history" name="History" style="display: none;">
+                        <div class="grid grid-cols-1 gap-3">
+                            <div class="stats stats-vertical sm:stats-horizontal shadow">
+                                <div class="stat">
+                                    <div class="stat-title">In tolerance</div>
+                                    <div id="historyInTolerance" class="stat-value text-2xl">--</div>
+                                    <div id="historyInToleranceDesc" class="stat-desc">0 charges</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title">Mean / max deviation</div>
+                                    <div id="historyDeviation" class="stat-value text-2xl">--</div>
+                                    <div id="historyTopups" class="stat-desc">--</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title">Mean time</div>
+                                    <div id="historyMeanTime" class="stat-value text-2xl">--</div>
+                                    <div id="historyLearning" class="stat-desc">--</div>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-3 gap-2">
+                                <button class="btn btn-neutral" onclick="loadChargeHistory()">Refresh</button>
+                                <button class="btn btn-neutral" onclick="exportChargeHistoryCsv()">Export CSV</button>
+                                <button class="btn btn-warning" onclick="clearChargeHistory()">Clear</button>
+                            </div>
+
+                            <div class="overflow-x-auto">
+                                <table class="table table-xs table-zebra">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Target</th>
+                                            <th>Final</th>
+                                            <th>Dev.</th>
+                                            <th>Top-ups</th>
+                                            <th>Time (s)</th>
+                                            <th>LED</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="historyTableBody">
+                                        <tr><td colspan="7">No charge recorded yet.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- Wireless Settings -->
                     <section class="settings-page" id="settings-wireless" name="Wireless" style="display: none;">
                         <form id="wirelessConfigForm" action="/rest/wireless_config" class="grid grid-cols-1 gap-3">
@@ -763,6 +885,8 @@
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-scale')">Scale</a></li>
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-profile')">Profiles</a></li>
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-charge-mode')">Charge Mode</a></li>
+                    <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-charge-precision')">Charge Precision</a></li>
+                    <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-history')">History</a></li>
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-wireless')">Wireless</a></li>
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-coarse-motor')">Coarse Motor</a></li>
                     <li><a class="text-lg" onclick="onSettingsLinkClicked('settings-fine-motor')">Fine Motor</a></li>
@@ -1429,6 +1553,11 @@
             settingsDrawer.checked = false;
         }
 
+        // Charge history page has no form: load the history table instead
+        if (sectionId == "settings-history") {
+            loadChargeHistory();
+        }
+
         // Populate values
         const form = targetSection.querySelector("form");
         if (form) {
@@ -1668,6 +1797,7 @@
         const endpoints = [
             "/rest/scale_config",
             "/rest/charge_mode_config",
+            "/rest/charge_tuning_config",
             "/rest/coarse_motor_config",
             "/rest/fine_motor_config",
             "/rest/mini_12864_config",
@@ -1771,6 +1901,265 @@
             reader.readAsText(file);
         }
         input.click();
+    }
+
+    // ------------------------------------------------------------------
+    // Charge history
+    // ------------------------------------------------------------------
+    let chargeHistoryData = null;
+
+    function _fmt(value, digits) {
+        return Number(value).toFixed(digits);
+    }
+
+    function _historyResultLabel(result) {
+        if (result == 0) return '<span class="badge badge-success">OK</span>';
+        if (result == 1) return '<span class="badge badge-error">Low</span>';
+        return '<span class="badge badge-error">High</span>';
+    }
+
+    function renderChargeHistory(data) {
+        chargeHistoryData = data;
+        const body = document.getElementById("historyTableBody");
+        const rows = data["h"] || [];
+
+        // Table
+        if (rows.length == 0) {
+            body.innerHTML = '<tr><td colspan="7">No charge recorded yet.</td></tr>';
+        }
+        else {
+            let html = "";
+            for (const r of rows) {
+                const dev = r[2] - r[1];
+                const sign = dev > 0 ? "+" : "";
+                html += `<tr><td>${r[0]}</td><td>${_fmt(r[1], 3)}</td><td>${_fmt(r[2], 3)}</td>` +
+                        `<td>${sign}${_fmt(dev, 3)}</td><td>${r[3]}</td><td>${_fmt(r[4], 1)}</td>` +
+                        `<td>${_historyResultLabel(r[5])}</td></tr>`;
+            }
+            body.innerHTML = html;
+        }
+
+        // Summary
+        const n = rows.length;
+        if (n > 0) {
+            const ok = rows.filter(r => r[5] == 0).length;
+            const devs = rows.map(r => Math.abs(r[2] - r[1]));
+            const meanDev = devs.reduce((a, b) => a + b, 0) / n;
+            const maxDev = Math.max(...devs);
+            const meanTime = rows.reduce((a, r) => a + r[4], 0) / n;
+            const withTopup = rows.filter(r => r[3] > 0).length;
+
+            document.getElementById("historyInTolerance").innerText = `${Math.round(100 * ok / n)} %`;
+            document.getElementById("historyInToleranceDesc").innerText = `${ok} / ${n} charges (+${_fmt(data["t0"], 3)} / -${_fmt(data["t1"], 3)})`;
+            document.getElementById("historyDeviation").innerText = `${_fmt(meanDev, 3)} / ${_fmt(maxDev, 3)}`;
+            document.getElementById("historyTopups").innerText = `${withTopup} charge(s) with top-up`;
+            document.getElementById("historyMeanTime").innerText = `${_fmt(meanTime, 1)} s`;
+        }
+        else {
+            document.getElementById("historyInTolerance").innerText = "--";
+            document.getElementById("historyInToleranceDesc").innerText = "0 charges";
+            document.getElementById("historyDeviation").innerText = "--";
+            document.getElementById("historyTopups").innerText = "--";
+            document.getElementById("historyMeanTime").innerText = "--";
+        }
+
+        document.getElementById("historyLearning").innerText =
+            `Learned in-flight: ${_fmt(data["inflight"], 3)} (${data["samples"]} samples)`;
+    }
+
+    function loadChargeHistory() {
+        fetch("/rest/charge_history")
+        .then(response => response.json())
+        .then(data => renderChargeHistory(data))
+        .catch(error => console.error(error));
+    }
+
+    function clearChargeHistory() {
+        if (!confirm("Effacer tout l'historique des charges ?")) {
+            return;
+        }
+        fetch("/rest/charge_history?clr=true")
+        .then(response => response.json())
+        .then(data => renderChargeHistory(data))
+        .catch(error => console.error(error));
+    }
+
+    function exportChargeHistoryCsv() {
+        if (!chargeHistoryData) {
+            return;
+        }
+        const rows = (chargeHistoryData["h"] || []).slice().reverse();  // Oldest first
+        let csv = "charge;cible;poids_final;ecart;complements;duree_s;resultat;point_arret\n";
+        const labels = ["OK", "BAS", "HAUT"];
+        for (const r of rows) {
+            const dev = r[2] - r[1];
+            csv += [r[0], _fmt(r[1], 3), _fmt(r[2], 3), _fmt(dev, 3), r[3], _fmt(r[4], 1), labels[r[5]] || r[5], _fmt(r[6], 3)]
+                   .join(";").replace(/\./g, ",") + "\n";
+        }
+        const blob = new Blob([csv], {type: 'text/csv'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "opentrickler_historique.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // ------------------------------------------------------------------
+    // Bulles d'aide (en français) : cliquer sur le nom d'un réglage
+    // Clé : "<action du formulaire>|<nom du champ>"
+    // ------------------------------------------------------------------
+    const SETTINGS_HELP = {
+        // Balance
+        "/rest/scale_config|s0": "Modèle de balance branchée sur l'OpenTrickler. Pour une A&D FX-120i / FZ-120i, choisir « AND FX-i Std ».",
+        "/rest/scale_config|s1": "Vitesse de communication série. Doit être identique au réglage de la balance (A&D : fonction « bPS »). 19200 est conseillé pour des mesures plus rapides.",
+        "/rest/scale_config|s2": "Format des données série. Doit correspondre au réglage de la balance (A&D : fonction « btPr »). En général : 8 bits, sans parité.",
+
+        // Profils
+        "/rest/profile_config|pf": "Choix du profil à afficher et modifier. Un profil correspond en général à une poudre.",
+        "/rest/profile_config|p2": "Nom du profil (16 caractères max), par exemple le nom de la poudre.",
+        "/rest/profile_config|p3": "Gain proportionnel du trickler principal (gros débit). Plus il est élevé, plus le moteur tourne vite quand on est loin de la cible.",
+        "/rest/profile_config|p4": "Gain intégral du trickler principal. Corrige un débit trop lent qui dure. Laisser à 0 ou très faible si vous n'êtes pas sûr.",
+        "/rest/profile_config|p5": "Gain dérivé du trickler principal. Freine quand le poids monte vite. Une valeur trop forte rend le débit saccadé.",
+        "/rest/profile_config|p6": "Vitesse minimale du trickler principal (tours/s) pendant la charge.",
+        "/rest/profile_config|p7": "Vitesse maximale du trickler principal (tours/s). Plus haut = charge plus rapide, mais risque de dépassement.",
+        "/rest/profile_config|p8": "Gain proportionnel du trickler fin. Plus il est élevé, plus le trickler fin va vite loin de la cible.",
+        "/rest/profile_config|p9": "Gain intégral du trickler fin. Laisser à 0 ou très faible si vous n'êtes pas sûr.",
+        "/rest/profile_config|p10": "Gain dérivé du trickler fin. Freine quand le poids monte vite.",
+        "/rest/profile_config|p11": "Vitesse minimale du trickler fin (tours/s). C'est aussi la vitesse des compléments automatiques si « Top-up Speed » vaut 0.",
+        "/rest/profile_config|p12": "Vitesse maximale du trickler fin (tours/s).",
+
+        // Charge Mode
+        "/rest/charge_mode_config|c1": "Couleur des LEDs quand la charge finale est dans la tolérance (vert conseillé).",
+        "/rest/charge_mode_config|c2": "Couleur des LEDs PENDANT la charge (trickler en marche). Une charge finale trop basse s'affiche avec la couleur « Over Charge » (rouge).",
+        "/rest/charge_mode_config|c3": "Couleur des LEDs quand la charge finale est hors tolérance, trop haute OU trop basse (rouge conseillé).",
+        "/rest/charge_mode_config|c4": "Couleur des LEDs quand l'appareil attend (mise à zéro, retour de la coupelle).",
+        "/rest/charge_mode_config|c5": "Écart avec la cible (en grains) auquel le trickler principal s'arrête pour laisser finir le trickler fin. Plus grand = plus précis mais plus lent. Valeur typique : 2 à 5.",
+        "/rest/charge_mode_config|c6": "Écart avec la cible auquel le trickler fin s'arrête. Utilisé seulement si l'apprentissage du point d'arrêt est désactivé, ou pour la toute première charge. Valeur typique : 0,03 à 0,10.",
+        "/rest/charge_mode_config|c7": "Écart-type maximum entre 5 mesures pour considérer la balance stable. Plus petit = mesure plus sûre, mais attente plus longue. Valeur typique : 0,02.",
+        "/rest/charge_mode_config|c8": "Tolérance autour de zéro pour considérer la balance à zéro avant de démarrer une charge. Valeur typique : 0,02.",
+        "/rest/charge_mode_config|c9": "Nombre de décimales affichées et saisies (2 pour les grains, 3 pour les grammes).",
+        "/rest/charge_mode_config|c10": "Pré-charge : après une charge, prépare de la poudre derrière la gate pour accélérer la suivante. Nécessite la servo gate.",
+        "/rest/charge_mode_config|c11": "Durée de rotation du trickler principal pendant la pré-charge (ms).",
+        "/rest/charge_mode_config|c12": "Vitesse du trickler principal pendant la pré-charge (tours/s).",
+        "/rest/charge_mode_config|c13": "Position de la servo gate quand le trickler principal s'arrête (0 = ouverte, 1 = fermée).",
+
+        // Précision de charge
+        "/rest/charge_tuning_config|t0": "Tolérance au-dessus de la cible. Si la charge finale dépasse la cible de cette valeur ou plus, la LED est rouge. Exemple : 0,05 avec une cible de 24,00 → rouge à partir de 24,05.",
+        "/rest/charge_tuning_config|t1": "Tolérance en dessous de la cible. Si la charge finale est en dessous de la cible de cette valeur ou plus, la LED est rouge (et le complément automatique se déclenche). Exemple : 0,05 → rouge à 23,95 ou moins.",
+        "/rest/charge_tuning_config|t2": "Si la charge stabilisée est trop basse, le trickler fin donne de petites impulsions jusqu'à entrer dans la tolérance. Ne peut rien faire si la charge est trop haute.",
+        "/rest/charge_tuning_config|t3": "Nombre maximum d'impulsions de complément par charge. Évite de tourner sans fin si la trémie est vide. Valeur conseillée : 5.",
+        "/rest/charge_tuning_config|t4": "Vitesse du trickler fin pendant les compléments (tours/s). 0 = vitesse minimale du trickler fin du profil (conseillé).",
+        "/rest/charge_tuning_config|t5": "Durée minimale d'une impulsion de complément (ms). Trop court : le moteur n'a pas le temps de faire tomber de la poudre. Valeur conseillée : 100 à 200.",
+        "/rest/charge_tuning_config|t6": "Durée maximale d'une impulsion de complément (ms). Limite le risque de dépassement. Valeur conseillée : 1000 à 2000.",
+        "/rest/charge_tuning_config|t7": "Temps maximum d'attente pour que la balance se stabilise après l'arrêt ou une impulsion (ms). Passé ce délai, la moyenne des dernières mesures est utilisée.",
+        "/rest/charge_tuning_config|t8": "L'appareil mesure à chaque charge la poudre qui tombe encore après l'arrêt du moteur (« poudre en vol ») et ajuste tout seul le point d'arrêt. Repart de zéro au démarrage et à chaque changement de profil.",
+        "/rest/charge_tuning_config|t9": "Marge visée sous la cible lors de l'arrêt du trickler fin. Une petite marge (0,01 à 0,03) réduit fortement les charges trop hautes ; le complément automatique termine la charge.",
+        "/rest/charge_tuning_config|t10": "Limite haute du point d'arrêt appris. Sécurité contre une valeur aberrante (coupelle touchée, courant d'air). Valeur conseillée : 0,3 à 0,5.",
+
+        // Wi-Fi
+        "/rest/wireless_config|w0": "Nom de votre réseau Wi-Fi.",
+        "/rest/wireless_config|w1": "Mot de passe de votre réseau Wi-Fi. Il n'est jamais réaffiché.",
+        "/rest/wireless_config|w2": "Type de sécurité de votre Wi-Fi. WPA2-AES pour la plupart des box.",
+        "/rest/wireless_config|w3": "Temps maximum pour se connecter au Wi-Fi avant de basculer en point d'accès (ms).",
+        "/rest/wireless_config|w4": "Active ou désactive le Wi-Fi.",
+
+        // Moteurs (communs aux deux moteurs)
+        "|m0": "Accélération du moteur (tours/s²). Plus haut = démarrages et arrêts plus nets.",
+        "|m1": "Nombre de pas par tour du moteur pas à pas (200 pour la plupart des moteurs 1,8°).",
+        "|m2": "Courant envoyé au moteur (mA). Trop bas : le moteur saute des pas. Trop haut : il chauffe.",
+        "|m3": "Micro-pas du driver. Plus élevé = rotation plus douce et plus silencieuse.",
+        "|m4": "Vitesse maximale autorisée pour ce moteur (tours/s), quel que soit le profil.",
+        "|m5": "Valeur de la résistance de mesure de courant du driver (mOhm). Ne pas modifier sans raison.",
+        "|m6": "Vitesse minimale autorisée pour ce moteur (tours/s), quel que soit le profil.",
+        "|m7": "Rapport de réduction entre le moteur et le tube du trickler. 1 si entraînement direct.",
+        "|m8": "Inverse le signal d'activation du driver. À changer seulement si le moteur ne s'active pas.",
+        "|m9": "Inverse le sens de rotation du moteur.",
+
+        // Neopixel
+        "/rest/neopixel_led_config|bl": "Couleur du rétroéclairage de l'écran Mini 12864.",
+        "/rest/neopixel_led_config|l1": "Couleur par défaut de la LED 1 (hors mode charge).",
+        "/rest/neopixel_led_config|l2": "Couleur par défaut de la LED 2 (hors mode charge).",
+        "/rest/neopixel_led_config|l3": "Nombre de LEDs chaînées sur la sortie PWM OUT.",
+        "/rest/neopixel_led_config|l4": "Oui si vos LEDs sont RGBW (4 couleurs, ex. SK6812), Non pour des LEDs RGB (ex. WS2812B).",
+        "/rest/neopixel_led_config|l5": "Ordre des couleurs de vos LEDs. Si le rouge et le vert sont inversés, changez ce réglage.",
+
+        // Mini 12864
+        "/rest/mini_12864_config|b0": "Inverse le sens de rotation du bouton de l'écran.",
+        "/rest/mini_12864_config|b1": "Rotation de l'affichage (0° ou 180°).",
+
+        // Servo gate
+        "/rest/servo_gate_config|c0": "Active la servo gate (volet qui coupe l'arrivée de poudre).",
+        "/rest/servo_gate_config|c1": "Rapport cyclique du servo 0 en position fermée.",
+        "/rest/servo_gate_config|c2": "Rapport cyclique du servo 0 en position ouverte.",
+        "/rest/servo_gate_config|c3": "Rapport cyclique du servo 1 en position fermée.",
+        "/rest/servo_gate_config|c4": "Rapport cyclique du servo 1 en position ouverte.",
+        "/rest/servo_gate_config|c5": "Vitesse de fermeture de la gate (%/s).",
+        "/rest/servo_gate_config|c6": "Vitesse d'ouverture de la gate (%/s).",
+
+        // Système
+        "/rest/system_control|s0": "Identifiant unique de votre carte.",
+        "/rest/system_control|s1": "Version du firmware installé.",
+        "/rest/system_control|s2": "Identifiant de la version du code source.",
+        "/rest/system_control|s3": "Type de compilation du firmware.",
+        "/rest/system_control|s4": "Enregistre tous les réglages en mémoire pour qu'ils soient conservés après extinction.",
+        "/rest/system_control|s5": "Redémarre l'OpenTrickler.",
+        "/rest/system_control|s6": "ATTENTION : efface TOUS les réglages et revient aux valeurs d'usine. Irréversible.",
+    };
+
+    function setupSettingsHelp() {
+        const forms = document.querySelectorAll("#sectionSettings form");
+        for (const form of forms) {
+            const action = form.getAttribute("action");
+            const fields = form.querySelectorAll("[name]");
+            for (const field of fields) {
+                const name = field.getAttribute("name");
+                const text = SETTINGS_HELP[action + "|" + name] || SETTINGS_HELP["|" + name];
+                if (!text) continue;
+
+                const container = field.closest("div.grid");
+                if (!container) continue;
+                const label = container.querySelector(".label-text");
+                if (!label || label.dataset.helpReady) continue;
+                label.dataset.helpReady = "1";
+
+                // Info icon
+                label.style.cursor = "pointer";
+                label.insertAdjacentHTML("beforeend", ' <span class="text-info" aria-hidden="true">ⓘ</span>');
+
+                // Bubble
+                const bubble = document.createElement("div");
+                bubble.className = "alert alert-info text-sm py-2 col-span-full";
+                bubble.style.display = "none";
+                bubble.innerText = text;
+                container.appendChild(bubble);
+
+                label.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const isOpen = bubble.style.display != "none";
+                    document.querySelectorAll(".settings-help-open").forEach(b => {
+                        b.style.display = "none";
+                        b.classList.remove("settings-help-open");
+                    });
+                    if (!isOpen) {
+                        bubble.style.display = "flex";
+                        bubble.classList.add("settings-help-open");
+                    }
+                });
+                bubble.addEventListener("click", () => {
+                    bubble.style.display = "none";
+                    bubble.classList.remove("settings-help-open");
+                });
+            }
+        }
+    }
+
+    if (document.readyState != "loading") {
+        setupSettingsHelp();
+    }
+    else {
+        document.addEventListener('DOMContentLoaded', setupSettingsHelp);
     }
 
     // Start the long polling process when the page loads

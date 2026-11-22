@@ -55,6 +55,106 @@ const eeprom_charge_mode_data_t default_charge_mode_data = {
     .neopixel_not_ready_colour = RGB_COLOUR_BLUE,             // blue
 };
 
+// Valeur de validation "legacy" volontairement improbable : le bloc est ensuite valide par CRC32
+#define EEPROM_CHARGE_TUNING_DATA_REV   0x5A17
+
+const eeprom_charge_tuning_data_t default_charge_tuning_data = {
+    .charge_tuning_data_rev = 0,
+
+    .tolerance_over = 0.05,
+    .tolerance_under = 0.05,
+
+    .topup_enable = true,
+    .topup_max_attempts = 5,
+    .topup_speed_rps = 0,           // 0 = vitesse min du trickler fin du profil
+    .topup_min_pulse_ms = 150,
+    .topup_max_pulse_ms = 1500,
+    .settle_timeout_ms = 6000,
+
+    .learning_enable = true,
+    .aim_bias = 0.02,
+    .learning_max_offset = 0.5,
+};
+
+
+// ---------------------------------------------------------------------------
+// Etat d'execution (memoire vive uniquement)
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    CHARGE_RESULT_OK = 0,
+    CHARGE_RESULT_UNDER = 1,
+    CHARGE_RESULT_OVER = 2,
+} charge_result_t;
+
+// Apprentissage du point d'arret (poudre "en vol")
+static float learned_inflight = 0.0f;           // Moyenne glissante (unite balance)
+static uint32_t learned_samples = 0;
+static float topup_rate_per_ms = 0.0f;          // Poudre ajoutee par ms d'impulsion (0 = inconnu)
+static int32_t learned_profile_idx = -1;        // Remise a zero si on change de profil
+
+// Resultat de la derniere charge (utilise pour la LED)
+static float last_final_weight = 0.0f;
+static charge_result_t last_charge_result = CHARGE_RESULT_OK;
+
+// Historique des charges
+#define CHARGE_HISTORY_SIZE 100
+
+typedef struct {
+    uint32_t seq;
+    float target;
+    float final_weight;
+    float elapsed_s;
+    float stop_offset;
+    uint8_t topups;
+    uint8_t result;
+} charge_history_entry_t;
+
+static charge_history_entry_t charge_history[CHARGE_HISTORY_SIZE];
+static uint32_t charge_history_count = 0;       // Nombre d'entrees valides (<= CHARGE_HISTORY_SIZE)
+static uint32_t charge_history_head = 0;        // Prochaine position d'ecriture
+static uint32_t charge_history_seq = 0;         // Numero de la derniere charge
+
+
+static void charge_history_add(float target, float final_weight, float elapsed_s, float stop_offset, uint8_t topups, charge_result_t result) {
+    charge_history_entry_t entry;
+    entry.seq = charge_history_seq + 1;
+    entry.target = target;
+    entry.final_weight = final_weight;
+    entry.elapsed_s = elapsed_s;
+    entry.stop_offset = stop_offset;
+    entry.topups = topups;
+    entry.result = (uint8_t) result;
+
+    charge_history[charge_history_head] = entry;
+    charge_history_head = (charge_history_head + 1) % CHARGE_HISTORY_SIZE;
+    if (charge_history_count < CHARGE_HISTORY_SIZE) {
+        charge_history_count += 1;
+    }
+    charge_history_seq += 1;
+}
+
+static void charge_history_clear(void) {
+    charge_history_count = 0;
+    charge_history_head = 0;
+    charge_history_seq = 0;
+}
+
+
+static charge_result_t classify_charge(float final_weight) {
+    const float eps = 0.0005f;  // Tolere les erreurs d'arrondi des flottants
+    float deviation = final_weight - charge_mode_config.target_charge_weight;
+
+    if (deviation > charge_mode_config.eeprom_charge_tuning_data.tolerance_over - eps) {
+        return CHARGE_RESULT_OVER;
+    }
+    if (deviation < -(charge_mode_config.eeprom_charge_tuning_data.tolerance_under - eps)) {
+        return CHARGE_RESULT_UNDER;
+    }
+    return CHARGE_RESULT_OK;
+}
+
+
 // Configures
 TaskHandle_t scale_measurement_render_task_handler = NULL;
 static char title_string[30];
@@ -200,6 +300,160 @@ void charge_mode_wait_for_zero() {
     charge_mode_config.charge_mode_state = CHARGE_MODE_WAIT_FOR_COMPLETE;
 }
 
+typedef enum {
+    SETTLE_STABLE = 0,      // Balance stable
+    SETTLE_TIMEOUT = 1,     // Pas stable dans le temps imparti (on utilise la moyenne)
+    SETTLE_ABORTED = 2,     // L'utilisateur a demande l'arret
+} settle_result_t;
+
+/*
+ * Attend que la balance soit stable : 5 mesures consecutives avec un ecart-type
+ * inferieur a "Set Point Accuracy (Standard Deviation)".
+ * Retourne la moyenne de ces mesures dans *stable_weight.
+ */
+static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t timeout_ms) {
+    const size_t window = 5;
+    FloatRingBuffer data_buffer(window);
+    TickType_t start_tick = xTaskGetTickCount();
+    float last_weight = scale_get_current_measurement();
+
+    while (true) {
+        ButtonEncoderEvent_t button_encoder_event = button_wait_for_input(false);
+        if (button_encoder_event == BUTTON_RST_PRESSED) {
+            return SETTLE_ABORTED;
+        }
+
+        float current_weight;
+        if (scale_block_wait_for_next_measurement(200, &current_weight)) {
+            data_buffer.enqueue(current_weight);
+            last_weight = current_weight;
+
+            if (data_buffer.getCounter() >= window &&
+                data_buffer.getSd() < charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin) {
+                *stable_weight = data_buffer.getMean();
+                return SETTLE_STABLE;
+            }
+        }
+
+        uint32_t elapsed_ms = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+        if (elapsed_ms >= timeout_ms) {
+            if (data_buffer.getCounter() >= window) {
+                *stable_weight = data_buffer.getMean();
+            }
+            else {
+                *stable_weight = last_weight;
+            }
+            return SETTLE_TIMEOUT;
+        }
+    }
+}
+
+
+/*
+ * Apres l'arret des moteurs : attend la stabilisation, apprend la poudre "en vol",
+ * puis complete par petites impulsions du trickler fin jusqu'a la zone verte.
+ * Retourne false si l'utilisateur a demande l'arret.
+ */
+static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_speed, uint8_t * topups_done) {
+    eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
+    float target = charge_mode_config.target_charge_weight;
+    *topups_done = 0;
+
+    // Laisser retomber la poudre encore en vol
+    snprintf(title_string, sizeof(title_string), "Settling...");
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    float stable_weight;
+    if (wait_for_stable_weight(&stable_weight, tuning->settle_timeout_ms) == SETTLE_ABORTED) {
+        return false;
+    }
+
+    // Apprentissage : quantite arrivee apres l'arret des moteurs
+    if (tuning->learning_enable) {
+        float inflight_sample = stable_weight - weight_at_stop;
+
+        // On ignore les valeurs aberrantes (lecture parasite, coupelle touchee...)
+        if (inflight_sample > -0.02f && inflight_sample < tuning->learning_max_offset + 0.1f) {
+            inflight_sample = fmaxf(0.0f, inflight_sample);
+            if (learned_samples == 0) {
+                learned_inflight = inflight_sample;
+            }
+            else {
+                learned_inflight = 0.7f * learned_inflight + 0.3f * inflight_sample;
+            }
+            learned_samples += 1;
+        }
+    }
+
+    // Complement automatique
+    if (tuning->topup_enable) {
+        float topup_speed = tuning->topup_speed_rps > 0 ? tuning->topup_speed_rps : fine_min_speed;
+        uint32_t fallback_pulse_ms = tuning->topup_min_pulse_ms;
+
+        while (*topups_done < tuning->topup_max_attempts &&
+               classify_charge(stable_weight) == CHARGE_RESULT_UNDER) {
+
+            float missing = target - stable_weight;
+
+            // On vise le milieu de la marge basse pour ne pas depasser
+            float wanted = fmaxf(missing - 0.5f * tuning->tolerance_under, 0.25f * missing);
+
+            uint32_t pulse_ms;
+            if (topup_rate_per_ms > 0) {
+                pulse_ms = (uint32_t) (wanted / topup_rate_per_ms);
+            }
+            else {
+                pulse_ms = fallback_pulse_ms;
+            }
+            if (pulse_ms < tuning->topup_min_pulse_ms) {
+                pulse_ms = tuning->topup_min_pulse_ms;
+            }
+            if (pulse_ms > tuning->topup_max_pulse_ms) {
+                pulse_ms = tuning->topup_max_pulse_ms;
+            }
+
+            *topups_done += 1;
+            snprintf(title_string, sizeof(title_string), "Top-up %u/%lu",
+                     (unsigned) *topups_done, (unsigned long) tuning->topup_max_attempts);
+
+            // Impulsion du trickler fin
+            motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, topup_speed);
+            vTaskDelay(pdMS_TO_TICKS(pulse_ms));
+            motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
+            vTaskDelay(pdMS_TO_TICKS(300));
+
+            float previous_weight = stable_weight;
+            if (wait_for_stable_weight(&stable_weight, tuning->settle_timeout_ms) == SETTLE_ABORTED) {
+                return false;
+            }
+
+            // Apprentissage du debit des impulsions
+            float gained = stable_weight - previous_weight;
+            if (gained > 0.005f) {
+                float rate_sample = gained / (float) pulse_ms;
+                if (topup_rate_per_ms > 0) {
+                    topup_rate_per_ms = 0.6f * topup_rate_per_ms + 0.4f * rate_sample;
+                }
+                else {
+                    topup_rate_per_ms = rate_sample;
+                }
+            }
+            else {
+                // Rien n'est tombe : impulsion suivante plus longue
+                if (topup_rate_per_ms > 0) {
+                    topup_rate_per_ms *= 0.5f;
+                }
+                fallback_pulse_ms = pulse_ms * 2;
+            }
+        }
+    }
+
+    last_final_weight = stable_weight;
+    last_charge_result = classify_charge(stable_weight);
+    return true;
+}
+
+
 void charge_mode_wait_for_complete() {
 
     charge_start_tick = xTaskGetTickCount();
@@ -247,6 +501,23 @@ void charge_mode_wait_for_complete() {
     // The coarse trickler is suppose to stop ahead of the target weight by an offset
     float coarse_trickler_target_charge_weight = fmaxf(0.0f, charge_mode_config.target_charge_weight - charge_mode_config.eeprom_charge_mode_data.coarse_stop_threshold);
 
+    // Point d'arret du trickler fin : appris automatiquement, sinon "Fine Trickler Stop Threshold"
+    eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
+    int32_t profile_idx = (int32_t) profile_get_selected_idx();
+    if (profile_idx != learned_profile_idx) {
+        // Nouveau profil (nouvelle poudre) : on recommence l'apprentissage
+        learned_profile_idx = profile_idx;
+        learned_samples = 0;
+        learned_inflight = 0.0f;
+        topup_rate_per_ms = 0.0f;
+    }
+
+    float fine_stop_offset = charge_mode_config.eeprom_charge_mode_data.fine_stop_threshold;
+    if (tuning->learning_enable && learned_samples > 0) {
+        fine_stop_offset = fminf(fmaxf(0.0f, learned_inflight + tuning->aim_bias), tuning->learning_max_offset);
+    }
+    float weight_at_stop = 0.0f;
+
     TickType_t last_sample_tick = xTaskGetTickCount();
     TickType_t current_sample_tick = last_sample_tick;
     bool should_coarse_trickler_move = true;
@@ -272,11 +543,12 @@ void charge_mode_wait_for_complete() {
         float fine_trickler_error = charge_mode_config.target_charge_weight - current_weight;
 
         // Fine & Coarse trickler stop condition
-        if (fine_trickler_error < charge_mode_config.eeprom_charge_mode_data.fine_stop_threshold) {
+        if (fine_trickler_error < fine_stop_offset) {
             // Stop all motors
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
             motor_set_speed(SELECT_COARSE_TRICKLER_MOTOR, 0);
 
+            weight_at_stop = current_weight;
             break;
         }
 
@@ -330,10 +602,22 @@ void charge_mode_wait_for_complete() {
         coarse_trickler_last_error = coarse_trickler_error;
     }
 
-    // Stop the timer 
+    // Stabilisation, apprentissage et complement automatique (avant de fermer la gate)
+    uint8_t topups_done = 0;
+    if (!charge_mode_settle_and_topup(weight_at_stop, fine_trickler_min_speed, &topups_done)) {
+        motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
+        charge_mode_config.charge_mode_state = CHARGE_MODE_EXIT;
+        return;
+    }
+
+    // Stop the timer
     TickType_t now = xTaskGetTickCount();
     TickType_t elapsed_ticks = now - charge_start_tick;
     last_charge_elapsed_seconds = (float)(elapsed_ticks * portTICK_PERIOD_MS) / 1000.0f;
+
+    // Historique
+    charge_history_add(charge_mode_config.target_charge_weight, last_final_weight,
+                       last_charge_elapsed_seconds, fine_stop_offset, topups_done, last_charge_result);
 
     // Close the gate if the servo gate is present
     if (servo_gate.eeprom_servo_gate_config.servo_gate_enable) {
@@ -365,32 +649,29 @@ void charge_mode_wait_for_cup_removal() {
 
     FloatRingBuffer data_buffer(5);
 
-    // Post charge analysis (while waiting for removal of the cup)
-    vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for other tasks to complete
-
-    // Take current measurement
-    float current_measurement = scale_get_current_measurement();
-    float error = charge_mode_config.target_charge_weight - current_measurement;
+    // Post charge analysis: le poids final stable a deja ete mesure (apres complement eventuel)
+    // et compare aux tolerances "Precision de charge".
 
     // Update LED colour before moving to the next stage
     // Over charged
-    if (error <= -charge_mode_config.eeprom_charge_mode_data.fine_stop_threshold) {
+    if (last_charge_result == CHARGE_RESULT_OVER) {
         neopixel_led_set_colour(
             neopixel_led_config.eeprom_neopixel_led_metadata.default_led_colours.mini12864_backlight_colour,
-            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour, 
-            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour, 
+            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour,
+            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour,
             true
         );
 
         // Set over charge
         charge_mode_config.charge_mode_event |= CHARGE_MODE_EVENT_OVER_CHARGE;
     }
-    // Under charged
-    else if (error >= charge_mode_config.eeprom_charge_mode_data.fine_stop_threshold) {
+    // Under charged : hors tolerance aussi -> meme couleur que la surcharge (rouge)
+    // La couleur "Under Charge" reste utilisee pendant la charge en cours.
+    else if (last_charge_result == CHARGE_RESULT_UNDER) {
         neopixel_led_set_colour(
-            neopixel_led_config.eeprom_neopixel_led_metadata.default_led_colours.mini12864_backlight_colour, 
-            charge_mode_config.eeprom_charge_mode_data.neopixel_under_charge_colour, 
-            charge_mode_config.eeprom_charge_mode_data.neopixel_under_charge_colour, 
+            neopixel_led_config.eeprom_neopixel_led_metadata.default_led_colours.mini12864_backlight_colour,
+            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour,
+            charge_mode_config.eeprom_charge_mode_data.neopixel_over_charge_colour,
             true
         );
 
@@ -588,6 +869,193 @@ bool charge_mode_config_init(void) {
 
     // Register to eeprom save all
     eeprom_register_handler(charge_mode_config_save);
+
+    // Reglages "Precision de charge" (bloc EEPROM separe)
+    is_ok = load_config(EEPROM_CHARGE_TUNING_BASE_ADDR, &charge_mode_config.eeprom_charge_tuning_data, &default_charge_tuning_data, sizeof(charge_mode_config.eeprom_charge_tuning_data), EEPROM_CHARGE_TUNING_DATA_REV);
+    if (!is_ok) {
+        printf("Unable to read charge tuning configuration\n");
+        memcpy(&charge_mode_config.eeprom_charge_tuning_data, &default_charge_tuning_data, sizeof(default_charge_tuning_data));
+    }
+    eeprom_register_handler(charge_tuning_config_save);
+
+    return true;
+}
+
+
+bool charge_tuning_config_save(void) {
+    return save_config(EEPROM_CHARGE_TUNING_BASE_ADDR, &charge_mode_config.eeprom_charge_tuning_data, sizeof(eeprom_charge_tuning_data_t));
+}
+
+
+bool http_rest_charge_tuning_config(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    // Mappings
+    // t0 (float): tolerance_over
+    // t1 (float): tolerance_under
+    // t2 (bool): topup_enable
+    // t3 (int): topup_max_attempts
+    // t4 (float): topup_speed_rps (0 = vitesse min du profil)
+    // t5 (int): topup_min_pulse_ms
+    // t6 (int): topup_max_pulse_ms
+    // t7 (int): settle_timeout_ms
+    // t8 (bool): learning_enable
+    // t9 (float): aim_bias
+    // t10 (float): learning_max_offset
+    // ee (bool): save to eeprom
+
+    static char json_buffer[384];
+    bool save_to_eeprom = false;
+    eeprom_charge_tuning_data_t * t = &charge_mode_config.eeprom_charge_tuning_data;
+
+    for (int idx = 0; idx < num_params; idx += 1) {
+        if (strcmp(params[idx], "t0") == 0) {
+            t->tolerance_over = fabsf(strtof(values[idx], NULL));
+        }
+        else if (strcmp(params[idx], "t1") == 0) {
+            t->tolerance_under = fabsf(strtof(values[idx], NULL));
+        }
+        else if (strcmp(params[idx], "t2") == 0) {
+            t->topup_enable = string_to_boolean(values[idx]);
+        }
+        else if (strcmp(params[idx], "t3") == 0) {
+            long v = strtol(values[idx], NULL, 10);
+            t->topup_max_attempts = (uint32_t) (v < 0 ? 0 : (v > 50 ? 50 : v));
+        }
+        else if (strcmp(params[idx], "t4") == 0) {
+            t->topup_speed_rps = fmaxf(0.0f, strtof(values[idx], NULL));
+        }
+        else if (strcmp(params[idx], "t5") == 0) {
+            long v = strtol(values[idx], NULL, 10);
+            t->topup_min_pulse_ms = (uint32_t) (v < 10 ? 10 : v);
+        }
+        else if (strcmp(params[idx], "t6") == 0) {
+            long v = strtol(values[idx], NULL, 10);
+            t->topup_max_pulse_ms = (uint32_t) (v < 10 ? 10 : v);
+        }
+        else if (strcmp(params[idx], "t7") == 0) {
+            long v = strtol(values[idx], NULL, 10);
+            t->settle_timeout_ms = (uint32_t) (v < 1000 ? 1000 : v);
+        }
+        else if (strcmp(params[idx], "t8") == 0) {
+            t->learning_enable = string_to_boolean(values[idx]);
+            // Desactiver/reactiver l'apprentissage repart de zero
+            learned_samples = 0;
+            learned_inflight = 0.0f;
+        }
+        else if (strcmp(params[idx], "t9") == 0) {
+            t->aim_bias = strtof(values[idx], NULL);
+        }
+        else if (strcmp(params[idx], "t10") == 0) {
+            t->learning_max_offset = fmaxf(0.0f, strtof(values[idx], NULL));
+        }
+        else if (strcmp(params[idx], "ee") == 0) {
+            save_to_eeprom = string_to_boolean(values[idx]);
+        }
+    }
+
+    // Coherence : impulsion min <= impulsion max
+    if (t->topup_max_pulse_ms < t->topup_min_pulse_ms) {
+        t->topup_max_pulse_ms = t->topup_min_pulse_ms;
+    }
+
+    if (save_to_eeprom) {
+        charge_tuning_config_save();
+    }
+
+    snprintf(json_buffer, sizeof(json_buffer),
+             "%s"
+             "{\"t0\":%0.3f,\"t1\":%0.3f,\"t2\":%s,\"t3\":%lu,\"t4\":%0.3f,\"t5\":%lu,\"t6\":%lu,"
+             "\"t7\":%lu,\"t8\":%s,\"t9\":%0.3f,\"t10\":%0.3f}",
+             http_json_header,
+             t->tolerance_over,
+             t->tolerance_under,
+             boolean_to_string(t->topup_enable),
+             (unsigned long) t->topup_max_attempts,
+             t->topup_speed_rps,
+             (unsigned long) t->topup_min_pulse_ms,
+             (unsigned long) t->topup_max_pulse_ms,
+             (unsigned long) t->settle_timeout_ms,
+             boolean_to_string(t->learning_enable),
+             t->aim_bias,
+             t->learning_max_offset);
+
+    size_t data_length = strlen(json_buffer);
+    file->data = json_buffer;
+    file->len = data_length;
+    file->index = data_length;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+
+    return true;
+}
+
+
+bool http_rest_charge_history(struct fs_file *file, int num_params, char *params[], char *values[]) {
+    // Parametres
+    // clr (bool): efface l'historique
+    //
+    // Reponse
+    // n: nombre d'entrees, seq: numero de la derniere charge
+    // inflight: poudre "en vol" apprise, samples: nb d'echantillons, rate: debit des complements (par seconde)
+    // t0/t1: tolerances + / -
+    // h: [[seq, cible, poids final, complements, duree (s), resultat (0=ok,1=bas,2=haut), point d'arret], ...]
+    //    de la plus recente a la plus ancienne
+
+    static char json_buffer[64 + 300 + CHARGE_HISTORY_SIZE * 72];
+
+    for (int idx = 0; idx < num_params; idx += 1) {
+        if (strcmp(params[idx], "clr") == 0 && string_to_boolean(values[idx])) {
+            charge_history_clear();
+        }
+    }
+
+    size_t len = 0;
+    int written = snprintf(json_buffer, sizeof(json_buffer),
+                           "%s"
+                           "{\"n\":%lu,\"seq\":%lu,\"inflight\":%0.3f,\"samples\":%lu,\"rate\":%0.4f,"
+                           "\"t0\":%0.3f,\"t1\":%0.3f,\"h\":[",
+                           http_json_header,
+                           (unsigned long) charge_history_count,
+                           (unsigned long) charge_history_seq,
+                           learned_inflight,
+                           (unsigned long) learned_samples,
+                           topup_rate_per_ms * 1000.0f,
+                           charge_mode_config.eeprom_charge_tuning_data.tolerance_over,
+                           charge_mode_config.eeprom_charge_tuning_data.tolerance_under);
+    if (written > 0) {
+        len = (size_t) written;
+    }
+
+    uint32_t count = charge_history_count;
+    for (uint32_t i = 0; i < count && len < sizeof(json_buffer); i++) {
+        uint32_t pos = (charge_history_head + CHARGE_HISTORY_SIZE - 1 - i) % CHARGE_HISTORY_SIZE;
+        charge_history_entry_t * e = &charge_history[pos];
+        written = snprintf(json_buffer + len, sizeof(json_buffer) - len,
+                           "%s[%lu,%0.3f,%0.3f,%u,%0.1f,%u,%0.3f]",
+                           i == 0 ? "" : ",",
+                           (unsigned long) e->seq,
+                           e->target,
+                           e->final_weight,
+                           (unsigned) e->topups,
+                           e->elapsed_s,
+                           (unsigned) e->result,
+                           e->stop_offset);
+        if (written <= 0 || (size_t) written >= sizeof(json_buffer) - len - 3) {
+            json_buffer[len] = '\0';  // Pas assez de place : on s'arrete proprement
+            break;
+        }
+        len += (size_t) written;
+    }
+
+    if (len < sizeof(json_buffer) - 3) {
+        json_buffer[len++] = ']';
+        json_buffer[len++] = '}';
+        json_buffer[len] = '\0';
+    }
+
+    size_t data_length = strlen(json_buffer);
+    file->data = json_buffer;
+    file->len = data_length;
+    file->index = data_length;
+    file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
 
     return true;
 }
