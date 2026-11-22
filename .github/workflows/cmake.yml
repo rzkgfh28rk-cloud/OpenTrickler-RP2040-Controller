@@ -14,6 +14,10 @@ on:
 #   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
 #   PICO_BOARD: pico_w
 
+env:
+  # Contournement : pioasm (outil du Pico SDK) ne compile plus avec les GCC recents sans <cstdint>
+  CXXFLAGS: "-include cstdint"
+
 jobs:
   build:
     # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
