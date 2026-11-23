@@ -1,4 +1,7 @@
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
 
 #include "profile.h"
 #include "eeprom.h"
@@ -6,6 +9,10 @@
 
 
 eeprom_profile_data_t profile_data;
+eeprom_profile_extra_data_t profile_extra_data;
+
+// Valeur de validation "legacy" volontairement improbable : le bloc est valide par CRC32
+#define EEPROM_PROFILE_EXTRA_DATA_REV   0x5A18
 
 extern void swuart_calcCRC(uint8_t* datagram, uint8_t datagramLength);
 
@@ -115,12 +122,38 @@ bool profile_data_init() {
     // Register to eeprom save all
     eeprom_register_handler(profile_data_save);
 
+    // Donnees complementaires par profil (bloc EEPROM separe)
+    eeprom_profile_extra_data_t default_extra;
+    memset(&default_extra, 0x0, sizeof(default_extra));
+    for (int i = 0; i < MAX_PROFILE_CNT; i++) {
+        default_extra.extras[i].retract_speed_rps = 1.0f;
+    }
+    if (!load_config(EEPROM_PROFILE_EXTRA_BASE_ADDR, &profile_extra_data, &default_extra, sizeof(profile_extra_data), EEPROM_PROFILE_EXTRA_DATA_REV)) {
+        printf("Unable to read profile extra data\n");
+        memcpy(&profile_extra_data, &default_extra, sizeof(default_extra));
+    }
+    eeprom_register_handler(profile_extra_data_save);
+
     return true;
+}
+
+
+bool profile_extra_data_save() {
+    return save_config(EEPROM_PROFILE_EXTRA_BASE_ADDR, &profile_extra_data, sizeof(profile_extra_data));
 }
 
 
 uint16_t profile_get_selected_idx() {
     return profile_data.current_profile_idx;
+}
+
+
+profile_extra_t * profile_get_selected_extra() {
+    uint16_t idx = profile_get_selected_idx();
+    if (idx >= MAX_PROFILE_CNT) {
+        idx = 0;
+    }
+    return &profile_extra_data.extras[idx];
 }
 
 
@@ -156,8 +189,11 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
     // p10 (float): fine_kd
     // p11 (float): fine_min_flow_speed_rps
     // p12 (float): fine_max_flow_speed_rps
+    // p13 (float): coarse_retract_rev (tours, 0 = desactive)
+    // p14 (float): fine_retract_rev (tours, 0 = desactive)
+    // p15 (float): retract_speed_rps
     // ee (bool): save to eeprom
-    static char buf[256];
+    static char buf[448];
 
     // Read the current loaded profile index
     uint8_t profile_idx = profile_get_selected_idx();
@@ -218,6 +254,18 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
             else if (strcmp(params[idx], "p12") == 0) {
                 current_profile->fine_max_flow_speed_rps = strtof(values[idx], NULL);
             }
+            else if (strcmp(params[idx], "p13") == 0) {
+                float v = fabsf(strtof(values[idx], NULL));
+                profile_extra_data.extras[profile_idx].coarse_retract_rev = v > 2.0f ? 2.0f : v;
+            }
+            else if (strcmp(params[idx], "p14") == 0) {
+                float v = fabsf(strtof(values[idx], NULL));
+                profile_extra_data.extras[profile_idx].fine_retract_rev = v > 2.0f ? 2.0f : v;
+            }
+            else if (strcmp(params[idx], "p15") == 0) {
+                float v = fabsf(strtof(values[idx], NULL));
+                profile_extra_data.extras[profile_idx].retract_speed_rps = v < 0.05f ? 0.05f : v;
+            }
             else if (strcmp(params[idx], "ee") == 0) {
                 save_to_eeprom = string_to_boolean(values[idx]);
             }
@@ -226,12 +274,13 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
         // Perform action
         if (save_to_eeprom) {
             profile_data_save();
+            profile_extra_data_save();
         }
 
         // Response
         snprintf(buf, sizeof(buf), 
                  "%s"
-                 "{\"pf\":%d,\"p0\":%ld,\"p1\":%ld,\"p2\":\"%s\",\"p3\":%0.3f,\"p4\":%0.3f,\"p5\":%0.3f,\"p6\":%0.3f,\"p7\":%0.3f,\"p8\":%0.3f,\"p9\":%0.3f,\"p10\":%0.3f,\"p11\":%0.3f,\"p12\":%0.3f}",
+                 "{\"pf\":%d,\"p0\":%ld,\"p1\":%ld,\"p2\":\"%s\",\"p3\":%0.3f,\"p4\":%0.3f,\"p5\":%0.3f,\"p6\":%0.3f,\"p7\":%0.3f,\"p8\":%0.3f,\"p9\":%0.3f,\"p10\":%0.3f,\"p11\":%0.3f,\"p12\":%0.3f,\"p13\":%0.3f,\"p14\":%0.3f,\"p15\":%0.3f}",
                  http_json_header,
                  profile_idx, 
                  current_profile->rev,
@@ -246,7 +295,10 @@ bool http_rest_profile_config(struct fs_file *file, int num_params, char *params
                  current_profile->fine_ki,
                  current_profile->fine_kd,
                  current_profile->fine_min_flow_speed_rps,
-                 current_profile->fine_max_flow_speed_rps);
+                 current_profile->fine_max_flow_speed_rps,
+                 profile_extra_data.extras[profile_idx].coarse_retract_rev,
+                 profile_extra_data.extras[profile_idx].fine_retract_rev,
+                 profile_extra_data.extras[profile_idx].retract_speed_rps);
     }
 
     size_t response_len = strlen(buf);

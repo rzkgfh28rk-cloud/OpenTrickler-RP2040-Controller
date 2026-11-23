@@ -32,6 +32,7 @@
 #define LWIP_HTTPD_DYNAMIC_FILE_READ    0
 #define LWIP_HTTPD_DYNAMIC_HEADERS      0
 #define LWIP_HTTPD_MAX_REQUEST_URI_LEN  128
+#define LWIP_HTTPD_MAX_CGI_PARAMETERS   24   // Plus de champs par formulaire (profils)
 #define LWIP_HTTPD_DYNAMIC_HEADERS      0
 #define LWIP_SOCKETS 1
 

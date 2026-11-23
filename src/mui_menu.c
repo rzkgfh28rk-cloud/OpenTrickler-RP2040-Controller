@@ -149,6 +149,8 @@ uint8_t render_charge_mode_next_button(mui_t * ui, uint8_t msg) {
         case MUIF_MSG_VALUE_INCREMENT:
         case MUIF_MSG_VALUE_DECREMENT:
             mui_SaveForm(ui);
+            // Propose la derniere charge utilisee avec le profil choisi
+            charge_mode_load_last_target_digits();
             if (charge_mode_config.eeprom_charge_mode_data.decimal_places == DP_2) {
                 ui->arg = 11;  // goto form 11
             }

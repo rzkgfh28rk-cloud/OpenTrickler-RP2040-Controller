@@ -4,6 +4,7 @@
 #include <math.h>
 #include <FreeRTOS.h>
 #include <queue.h>
+#include <task.h>
 #include <math.h>
 #include "app.h"
 #include "tmc2209.h"
@@ -485,6 +486,62 @@ void motor_set_speed(motor_select_t selected_motor, float new_velocity) {
             xQueueSend(fine_trickler_motor_config.stepper_speed_control_queue, &new_velocity, portMAX_DELAY);
         }
     }
+}
+
+
+/*
+ * Fait tourner un seul tube d'un nombre de tours donne (negatif = marche arriere),
+ * a partir de l'arret, puis s'arrete. Bloquant.
+ * Le moteur est pilote en vitesse avec rampe d'acceleration : on calcule un profil
+ * trapezoidal (acceleration, palier, deceleration) pour parcourir la bonne distance.
+ */
+void motor_rotate_blocking(motor_select_t selected_motor, float rotations, float speed_rps) {
+    motor_config_t * motor_config;
+    if (selected_motor == SELECT_COARSE_TRICKLER_MOTOR) {
+        motor_config = &coarse_trickler_motor_config;
+    }
+    else if (selected_motor == SELECT_FINE_TRICKLER_MOTOR) {
+        motor_config = &fine_trickler_motor_config;
+    }
+    else {
+        return;
+    }
+
+    float distance = fabsf(rotations);
+    float speed = fabsf(speed_rps);
+    if (motor_config->stepper_speed_control_queue == NULL || distance <= 0.0f || speed <= 0.0f) {
+        return;
+    }
+
+    // Attendre que les commandes precedentes (ex : arret) soient traitees
+    for (int i = 0; i < 400 && uxQueueMessagesWaiting(motor_config->stepper_speed_control_queue) > 0; i++) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    float accel_motor = motor_config->persistent_config.angular_acceleration;
+    if (accel_motor <= 0.0f) {
+        accel_motor = 100.0f;
+    }
+    // Fin de la rampe en cours (prev_velocity n'est mis a jour qu'apres la rampe)
+    vTaskDelay(pdMS_TO_TICKS((uint32_t) (fabsf(motor_config->prev_velocity) / accel_motor * 1000.0f) + 30));
+
+    // Acceleration exprimee en tours de tube (meme unite que les vitesses du profil)
+    float gear_ratio = motor_config->persistent_config.gear_ratio > 0 ? motor_config->persistent_config.gear_ratio : 1.0f;
+    float accel = accel_motor * gear_ratio;
+
+    // Distance trop courte pour atteindre la vitesse : profil triangulaire
+    if (distance < speed * speed / accel) {
+        speed = sqrtf(distance * accel);
+    }
+    float ramp_s = speed / accel;
+    float cruise_s = (distance - speed * speed / accel) / speed;
+    if (cruise_s < 0) {
+        cruise_s = 0;
+    }
+
+    motor_set_speed(selected_motor, rotations < 0 ? -speed : speed);
+    vTaskDelay(pdMS_TO_TICKS((uint32_t) ((ramp_s + cruise_s) * 1000.0f)));
+    motor_set_speed(selected_motor, 0);
+    vTaskDelay(pdMS_TO_TICKS((uint32_t) (ramp_s * 1000.0f) + 30));
 }
 
 

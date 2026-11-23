@@ -283,6 +283,23 @@
                                 <input type="number" class="input input-bordered" name="p12" step="0.001">
                             </div>
 
+                            <div class="divider">Tube Retract</div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Coarse Trickler Retract (rev, 0 = off)</span>
+                                <input type="number" class="input input-bordered" name="p13" step="0.005" min="0" max="2">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Fine Trickler Retract (rev, 0 = off)</span>
+                                <input type="number" class="input input-bordered" name="p14" step="0.005" min="0" max="2">
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-1">
+                                <span class="label-text">Retract Speed (rps)</span>
+                                <input type="number" class="input input-bordered" name="p15" step="0.01" min="0.05">
+                            </div>
+
                             <button class="btn btn-neutral settings-apply-btn">Apply</button>
                         </form>
                     </section>
@@ -459,6 +476,11 @@
                                     <div class="stat-title">Mean time</div>
                                     <div id="historyMeanTime" class="stat-value text-2xl">--</div>
                                     <div id="historyLearning" class="stat-desc">--</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title">Powder used</div>
+                                    <div id="historyTotalPowder" class="stat-value text-2xl">--</div>
+                                    <div id="historyTotalPowderDesc" class="stat-desc">--</div>
                                 </div>
                             </div>
 
@@ -1250,6 +1272,8 @@
     }
 
     // Function to poll charge mode status (weight, progress, etc)
+    let lastSeenProfileName = null;
+
     function pollChargeModeStatus() {
         fetch("/rest/charge_mode_state")
         .then(response => {
@@ -1279,6 +1303,17 @@
 
             profileName = document.getElementById("profileName");
             profileName.innerText = String(profile_name);
+
+            // Propose la derniere charge utilisee avec ce profil
+            // (au changement de profil, ou si le champ est vide et pas en cours de saisie)
+            const lastTarget = Number(data["s6"] || 0);
+            const chargeWeightInput = document.getElementById("chargeWeightInput");
+            const profileChanged = (lastSeenProfileName !== null && lastSeenProfileName != profile_name);
+            if (lastTarget > 0 && chargeWeightInput && document.activeElement !== chargeWeightInput &&
+                (profileChanged || chargeWeightInput.value == "")) {
+                chargeWeightInput.value = lastTarget;
+            }
+            lastSeenProfileName = profile_name;
             
             // Find the charge time element and update its text content
             const chargeTimeElement = document.getElementById('chargeTimeValue');
@@ -1552,6 +1587,9 @@
         if (settingsDrawer.checked) {
             settingsDrawer.checked = false;
         }
+
+        // Bulles d'aide (sans effet si deja en place)
+        setupSettingsHelp();
 
         // Charge history page has no form: load the history table instead
         if (sectionId == "settings-history") {
@@ -1965,6 +2003,12 @@
 
         document.getElementById("historyLearning").innerText =
             `Learned in-flight: ${_fmt(data["inflight"], 3)} (${data["samples"]} samples)`;
+
+        // Total de poudre (suppose des grains ; 1 gr = 0,06479891 g)
+        const total = Number(data["total"] || 0);
+        document.getElementById("historyTotalPowder").innerText = `${_fmt(total, 1)} gr`;
+        document.getElementById("historyTotalPowderDesc").innerText =
+            `${_fmt(total * 0.06479891, 2)} g, ${data["total_n"] || 0} charges`;
     }
 
     function loadChargeHistory() {
@@ -2028,6 +2072,9 @@
         "/rest/profile_config|p10": "Gain dérivé du trickler fin. Freine quand le poids monte vite.",
         "/rest/profile_config|p11": "Vitesse minimale du trickler fin (tours/s). C'est aussi la vitesse des compléments automatiques si « Top-up Speed » vaut 0.",
         "/rest/profile_config|p12": "Vitesse maximale du trickler fin (tours/s).",
+        "/rest/profile_config|p13": "Recul du tube principal quand il s'arrête, en tours (0,125 = 1/8 de tour). Retient la poudre au bord du tube pour qu'elle ne tombe pas après l'arrêt. 0 = désactivé.",
+        "/rest/profile_config|p14": "Recul du tube fin quand il s'arrête, en tours (0,125 = 1/8 de tour). Réduit la poudre « en vol » et donc les charges trop hautes. Le tube est ramené en position avant chaque complément. 0 = désactivé.",
+        "/rest/profile_config|p15": "Vitesse de rotation pendant le recul (tours/s). Valeur conseillée : 0,5 à 2. Trop rapide peut projeter de la poudre.",
 
         // Charge Mode
         "/rest/charge_mode_config|c1": "Couleur des LEDs quand la charge finale est dans la tolérance (vert conseillé).",
@@ -2053,7 +2100,7 @@
         "/rest/charge_tuning_config|t5": "Durée minimale d'une impulsion de complément (ms). Trop court : le moteur n'a pas le temps de faire tomber de la poudre. Valeur conseillée : 100 à 200.",
         "/rest/charge_tuning_config|t6": "Durée maximale d'une impulsion de complément (ms). Limite le risque de dépassement. Valeur conseillée : 1000 à 2000.",
         "/rest/charge_tuning_config|t7": "Temps maximum d'attente pour que la balance se stabilise après l'arrêt ou une impulsion (ms). Passé ce délai, la moyenne des dernières mesures est utilisée.",
-        "/rest/charge_tuning_config|t8": "L'appareil mesure à chaque charge la poudre qui tombe encore après l'arrêt du moteur (« poudre en vol ») et ajuste tout seul le point d'arrêt. Repart de zéro au démarrage et à chaque changement de profil.",
+        "/rest/charge_tuning_config|t8": "L'appareil mesure à chaque charge la poudre qui tombe encore après l'arrêt du moteur (« poudre en vol ») et ajuste tout seul le point d'arrêt. L'apprentissage est mémorisé pour chaque profil, même après extinction. Désactiver puis réactiver ce réglage remet à zéro l'apprentissage du profil en cours.",
         "/rest/charge_tuning_config|t9": "Marge visée sous la cible lors de l'arrêt du trickler fin. Une petite marge (0,01 à 0,03) réduit fortement les charges trop hautes ; le complément automatique termine la charge.",
         "/rest/charge_tuning_config|t10": "Limite haute du point d'arrêt appris. Sécurité contre une valeur aberrante (coupelle touchée, courant d'air). Valeur conseillée : 0,3 à 0,5.",
 

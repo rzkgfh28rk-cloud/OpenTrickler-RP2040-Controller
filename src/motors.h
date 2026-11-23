@@ -88,6 +88,7 @@ bool motor_config_init(void);
 bool motor_config_save(void);
 void motor_task(void *p);
 void motor_set_speed(motor_select_t selected_motor, float new_velocity);
+void motor_rotate_blocking(motor_select_t selected_motor, float rotations, float speed_rps);
 uint16_t get_motor_max_speed(motor_select_t selected_motor);
 float get_motor_min_speed(motor_select_t selected_motor);
 void motor_enable(motor_select_t selected_motor, bool enable);

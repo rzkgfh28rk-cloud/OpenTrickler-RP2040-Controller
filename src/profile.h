@@ -42,6 +42,30 @@ typedef struct {
 } eeprom_profile_data_t;
 
 
+// Donnees complementaires par profil, stockees dans un bloc EEPROM separe
+// (pour ne pas modifier la structure des profils existants et les conserver)
+typedef struct {
+    // Recul des tubes a l'arret (en tours, 0 = desactive)
+    float coarse_retract_rev;
+    float fine_retract_rev;
+    float retract_speed_rps;
+
+    // Derniere charge utilisee avec ce profil
+    float last_target_weight;
+
+    // Apprentissage memorise
+    float learned_inflight;
+    uint32_t learned_samples;
+    float topup_rate_per_ms;
+} profile_extra_t;
+
+typedef struct {
+    uint16_t profile_extra_data_rev;   // Doit rester a 0 (validation CRC32)
+    uint16_t reserved;
+    profile_extra_t extras[MAX_PROFILE_CNT];
+} eeprom_profile_extra_data_t;
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -55,6 +79,8 @@ bool profile_data_save();
 profile_t * profile_select(uint8_t idx);
 profile_t * profile_get_selected();
 uint16_t profile_get_selected_idx();
+profile_extra_t * profile_get_selected_extra();
+bool profile_extra_data_save();
 
 // REST interface
 bool http_rest_profile_config(struct fs_file *file, int num_params, char *params[], char *values[]);

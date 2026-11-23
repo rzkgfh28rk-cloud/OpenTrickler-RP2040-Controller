@@ -92,6 +92,7 @@ bool http_rest_charge_mode_state(struct fs_file *file, int num_params, char *par
 bool http_rest_charge_tuning_config(struct fs_file *file, int num_params, char *params[], char *values[]);
 bool http_rest_charge_history(struct fs_file *file, int num_params, char *params[], char *values[]);
 bool charge_tuning_config_save(void);
+void charge_mode_load_last_target_digits(void);
 
 
 #ifdef __cplusplus

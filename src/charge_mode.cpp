@@ -91,7 +91,13 @@ typedef enum {
 static float learned_inflight = 0.0f;           // Moyenne glissante (unite balance)
 static uint32_t learned_samples = 0;
 static float topup_rate_per_ms = 0.0f;          // Poudre ajoutee par ms d'impulsion (0 = inconnu)
-static int32_t learned_profile_idx = -1;        // Remise a zero si on change de profil
+
+// Total de poudre consommee (depuis le demarrage ou le dernier effacement)
+static float total_powder_weight = 0.0f;
+static uint32_t total_powder_charges = 0;
+
+// Le resultat de la derniere charge est affiche a l'ecran jusqu'a la charge suivante
+static bool has_last_result = false;
 
 // Resultat de la derniere charge (utilise pour la LED)
 static float last_final_weight = 0.0f;
@@ -135,6 +141,8 @@ static void charge_history_add(float target, float final_weight, float elapsed_s
 }
 
 static void charge_history_clear(void) {
+    total_powder_weight = 0.0f;
+    total_powder_charges = 0;
     charge_history_count = 0;
     charge_history_head = 0;
     charge_history_seq = 0;
@@ -242,6 +250,29 @@ void scale_measurement_render_task(void *p) {
         profile_t *current_profile = profile_get_selected();
         u8g2_SetFont(display_handler, u8g2_font_helvR08_tr);
         u8g2_DrawStr(display_handler, 5, 61, current_profile->name);
+
+        // Resultat de la derniere charge (petite ligne sous le poids, le poids reste en gros)
+        if (has_last_result && charge_mode_config.charge_mode_state != CHARGE_MODE_WAIT_FOR_COMPLETE) {
+            char result_string[24];
+            float deviation = last_final_weight - charge_mode_config.target_charge_weight;
+            if (charge_mode_config.eeprom_charge_mode_data.decimal_places == DP_3) {
+                snprintf(result_string, sizeof(result_string), "Ecart %+.3f", deviation);
+            }
+            else {
+                snprintf(result_string, sizeof(result_string), "Ecart %+.2f", deviation);
+            }
+            u8g2_DrawStr(display_handler, 5, 49, result_string);
+
+            const char * verdict = "OK";
+            if (last_charge_result == CHARGE_RESULT_OVER) {
+                verdict = "TROP HAUT";
+            }
+            else if (last_charge_result == CHARGE_RESULT_UNDER) {
+                verdict = "TROP BAS";
+            }
+            uint8_t verdict_width = u8g2_GetStrWidth(display_handler, verdict);
+            u8g2_DrawStr(display_handler, screen_width - verdict_width - 5, 49, verdict);
+        }
 
         u8g2_SendBuffer(display_handler);
 
@@ -354,7 +385,7 @@ static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t ti
  * puis complete par petites impulsions du trickler fin jusqu'a la zone verte.
  * Retourne false si l'utilisateur a demande l'arret.
  */
-static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_speed, uint8_t * topups_done) {
+static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_speed, profile_extra_t * extra, uint8_t * topups_done) {
     eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
     float target = charge_mode_config.target_charge_weight;
     *topups_done = 0;
@@ -416,10 +447,20 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             snprintf(title_string, sizeof(title_string), "Top-up %u/%lu",
                      (unsigned) *topups_done, (unsigned long) tuning->topup_max_attempts);
 
+            // Si le tube fin a recule, on le ramene d'abord en position
+            if (extra->fine_retract_rev > 0) {
+                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, extra->fine_retract_rev, extra->retract_speed_rps);
+            }
+
             // Impulsion du trickler fin
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, topup_speed);
             vTaskDelay(pdMS_TO_TICKS(pulse_ms));
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
+
+            // Puis recul a nouveau
+            if (extra->fine_retract_rev > 0) {
+                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
+            }
             vTaskDelay(pdMS_TO_TICKS(300));
 
             float previous_weight = stable_weight;
@@ -457,6 +498,7 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
 void charge_mode_wait_for_complete() {
 
     charge_start_tick = xTaskGetTickCount();
+    has_last_result = false;
 
     // Set colour to under charge
     neopixel_led_set_colour(
@@ -503,13 +545,22 @@ void charge_mode_wait_for_complete() {
 
     // Point d'arret du trickler fin : appris automatiquement, sinon "Fine Trickler Stop Threshold"
     eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
-    int32_t profile_idx = (int32_t) profile_get_selected_idx();
-    if (profile_idx != learned_profile_idx) {
-        // Nouveau profil (nouvelle poudre) : on recommence l'apprentissage
-        learned_profile_idx = profile_idx;
-        learned_samples = 0;
+    // Apprentissage memorise pour ce profil (conserve apres extinction)
+    profile_extra_t * extra = profile_get_selected_extra();
+    learned_inflight = extra->learned_inflight;
+    learned_samples = extra->learned_samples;
+    topup_rate_per_ms = extra->topup_rate_per_ms;
+    if (!isfinite(learned_inflight) || !isfinite(topup_rate_per_ms)) {
         learned_inflight = 0.0f;
+        learned_samples = 0;
         topup_rate_per_ms = 0.0f;
+    }
+
+    // Memorise la cible pour ce profil (proposee a la prochaine utilisation)
+    bool extra_changed = false;
+    if (fabsf(extra->last_target_weight - charge_mode_config.target_charge_weight) > 0.0005f) {
+        extra->last_target_weight = charge_mode_config.target_charge_weight;
+        extra_changed = true;
     }
 
     float fine_stop_offset = charge_mode_config.eeprom_charge_mode_data.fine_stop_threshold;
@@ -517,6 +568,7 @@ void charge_mode_wait_for_complete() {
         fine_stop_offset = fminf(fmaxf(0.0f, learned_inflight + tuning->aim_bias), tuning->learning_max_offset);
     }
     float weight_at_stop = 0.0f;
+    uint8_t stop_confirm_count = 0;     // Filtre anti-lecture parasite
 
     TickType_t last_sample_tick = xTaskGetTickCount();
     TickType_t current_sample_tick = last_sample_tick;
@@ -543,14 +595,30 @@ void charge_mode_wait_for_complete() {
         float fine_trickler_error = charge_mode_config.target_charge_weight - current_weight;
 
         // Fine & Coarse trickler stop condition
+        // Il faut 2 lectures de suite au-dessus du point d'arret : une lecture parasite isolee
+        // (vibration, grain qui frappe le plateau) ne doit pas arreter la charge.
         if (fine_trickler_error < fine_stop_offset) {
+            stop_confirm_count += 1;
+            if (stop_confirm_count < 2) {
+                continue;  // On garde la vitesse actuelle et on attend la lecture suivante
+            }
+
             // Stop all motors
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
             motor_set_speed(SELECT_COARSE_TRICKLER_MOTOR, 0);
 
             weight_at_stop = current_weight;
+
+            // Recul des tubes pour retenir la poudre au bord
+            if (should_coarse_trickler_move && extra->coarse_retract_rev > 0) {
+                motor_rotate_blocking(SELECT_COARSE_TRICKLER_MOTOR, -extra->coarse_retract_rev, extra->retract_speed_rps);
+            }
+            if (extra->fine_retract_rev > 0) {
+                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
+            }
             break;
         }
+        stop_confirm_count = 0;
 
         // Coarse trickler stop condition
         else if (coarse_trickler_error <= 0 &&
@@ -566,7 +634,11 @@ void charge_mode_wait_for_complete() {
 
                 servo_gate_set_ratio(r, false); // don't block the charge loop
             }
-            // TODO: When turning off the coarse trickler, also move reverse to back off some powder
+
+            // Recul du tube principal pour retenir la poudre au bord
+            if (extra->coarse_retract_rev > 0) {
+                motor_rotate_blocking(SELECT_COARSE_TRICKLER_MOTOR, -extra->coarse_retract_rev, extra->retract_speed_rps);
+            }
         }
     
 
@@ -604,7 +676,7 @@ void charge_mode_wait_for_complete() {
 
     // Stabilisation, apprentissage et complement automatique (avant de fermer la gate)
     uint8_t topups_done = 0;
-    if (!charge_mode_settle_and_topup(weight_at_stop, fine_trickler_min_speed, &topups_done)) {
+    if (!charge_mode_settle_and_topup(weight_at_stop, fine_trickler_min_speed, extra, &topups_done)) {
         motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
         charge_mode_config.charge_mode_state = CHARGE_MODE_EXIT;
         return;
@@ -615,9 +687,27 @@ void charge_mode_wait_for_complete() {
     TickType_t elapsed_ticks = now - charge_start_tick;
     last_charge_elapsed_seconds = (float)(elapsed_ticks * portTICK_PERIOD_MS) / 1000.0f;
 
-    // Historique
+    // Historique et total de poudre
     charge_history_add(charge_mode_config.target_charge_weight, last_final_weight,
                        last_charge_elapsed_seconds, fine_stop_offset, topups_done, last_charge_result);
+    if (last_final_weight > 0) {
+        total_powder_weight += last_final_weight;
+        total_powder_charges += 1;
+    }
+    has_last_result = true;
+
+    // Sauvegarde de l'apprentissage pour ce profil
+    if (extra->learned_inflight != learned_inflight ||
+        extra->learned_samples != learned_samples ||
+        extra->topup_rate_per_ms != topup_rate_per_ms) {
+        extra->learned_inflight = learned_inflight;
+        extra->learned_samples = learned_samples;
+        extra->topup_rate_per_ms = topup_rate_per_ms;
+        extra_changed = true;
+    }
+    if (extra_changed) {
+        profile_extra_data_save();
+    }
 
     // Close the gate if the servo gate is present
     if (servo_gate.eeprom_servo_gate_config.servo_gate_enable) {
@@ -775,6 +865,31 @@ void charge_mode_wait_for_cup_return() {
     }
 
     charge_mode_config.charge_mode_state = CHARGE_MODE_WAIT_FOR_ZERO;
+}
+
+
+// Pre-remplit les chiffres du menu "Select Charge Weight" avec la derniere cible du profil
+void charge_mode_load_last_target_digits(void) {
+    float target = profile_get_selected_extra()->last_target_weight;
+    if (!(target > 0.0f) || !isfinite(target)) {
+        return;
+    }
+
+    // Conversion en entier selon le nombre de decimales (2 dp : centiemes, 3 dp : milliemes)
+    uint32_t value;
+    if (charge_mode_config.eeprom_charge_mode_data.decimal_places == DP_3) {
+        value = (uint32_t) lroundf(target * 1000.0f);
+    }
+    else {
+        value = (uint32_t) lroundf(target * 100.0f);
+    }
+    if (value > 99999) {
+        return;  // Ne tient pas sur 5 chiffres
+    }
+    for (int i = 0; i < 5; i++) {
+        charge_weight_digits[i] = value % 10;
+        value /= 10;
+    }
 }
 
 
@@ -936,10 +1051,19 @@ bool http_rest_charge_tuning_config(struct fs_file *file, int num_params, char *
             t->settle_timeout_ms = (uint32_t) (v < 1000 ? 1000 : v);
         }
         else if (strcmp(params[idx], "t8") == 0) {
-            t->learning_enable = string_to_boolean(values[idx]);
-            // Desactiver/reactiver l'apprentissage repart de zero
-            learned_samples = 0;
-            learned_inflight = 0.0f;
+            bool new_learning_enable = string_to_boolean(values[idx]);
+            // Desactiver/reactiver l'apprentissage repart de zero (pour le profil en cours)
+            if (new_learning_enable != t->learning_enable) {
+                profile_extra_t * extra = profile_get_selected_extra();
+                extra->learned_inflight = 0.0f;
+                extra->learned_samples = 0;
+                extra->topup_rate_per_ms = 0.0f;
+                learned_samples = 0;
+                learned_inflight = 0.0f;
+                topup_rate_per_ms = 0.0f;
+                profile_extra_data_save();
+            }
+            t->learning_enable = new_learning_enable;
         }
         else if (strcmp(params[idx], "t9") == 0) {
             t->aim_bias = strtof(values[idx], NULL);
@@ -1007,17 +1131,21 @@ bool http_rest_charge_history(struct fs_file *file, int num_params, char *params
         }
     }
 
+    profile_extra_t * history_extra = profile_get_selected_extra();
     size_t len = 0;
     int written = snprintf(json_buffer, sizeof(json_buffer),
                            "%s"
                            "{\"n\":%lu,\"seq\":%lu,\"inflight\":%0.3f,\"samples\":%lu,\"rate\":%0.4f,"
+                           "\"total\":%0.3f,\"total_n\":%lu,"
                            "\"t0\":%0.3f,\"t1\":%0.3f,\"h\":[",
                            http_json_header,
                            (unsigned long) charge_history_count,
                            (unsigned long) charge_history_seq,
-                           learned_inflight,
-                           (unsigned long) learned_samples,
-                           topup_rate_per_ms * 1000.0f,
+                           history_extra->learned_inflight,
+                           (unsigned long) history_extra->learned_samples,
+                           history_extra->topup_rate_per_ms * 1000.0f,
+                           total_powder_weight,
+                           (unsigned long) total_powder_charges,
                            charge_mode_config.eeprom_charge_tuning_data.tolerance_over,
                            charge_mode_config.eeprom_charge_tuning_data.tolerance_under);
     if (written > 0) {
@@ -1183,8 +1311,9 @@ bool http_rest_charge_mode_state(struct fs_file *file, int num_params, char *par
     // s3 (uint32_t): Charge mode event
     // s4 (string): Profile Name
     // s5 (string): Elapsed time in seconds, live during charging
+    // s6 (float): Derniere cible utilisee avec le profil selectionne
 
-    static char charge_mode_json_buffer[160];  // Increased to fit s5
+    static char charge_mode_json_buffer[200];  // Increased to fit s5, s6
     char elapsed_time_buffer[16] = {0};
 
     // Control
@@ -1240,14 +1369,15 @@ bool http_rest_charge_mode_state(struct fs_file *file, int num_params, char *par
     snprintf(charge_mode_json_buffer, 
              sizeof(charge_mode_json_buffer),
              "%s"
-             "{\"s0\":%0.3f,\"s1\":%s,\"s2\":%d,\"s3\":%lu,\"s4\":\"%s\",\"s5\":\"%s\"}",
+             "{\"s0\":%0.3f,\"s1\":%s,\"s2\":%d,\"s3\":%lu,\"s4\":\"%s\",\"s5\":\"%s\",\"s6\":%0.3f}",
              http_json_header,
              charge_mode_config.target_charge_weight,
              weight_string,
              (int) charge_mode_config.charge_mode_state,
              charge_mode_config.charge_mode_event,
              profile_get_selected()->name,
-             elapsed_time_buffer);
+             elapsed_time_buffer,
+             profile_get_selected_extra()->last_target_weight);
 
     // Clear events
     charge_mode_config.charge_mode_event = 0;
