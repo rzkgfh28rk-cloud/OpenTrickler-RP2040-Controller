@@ -102,6 +102,7 @@ static bool has_last_result = false;
 // Resultat de la derniere charge (utilise pour la LED)
 static float last_final_weight = 0.0f;
 static charge_result_t last_charge_result = CHARGE_RESULT_OK;
+static uint8_t last_charge_topups = 0;
 
 // Historique des charges
 #define CHARGE_HISTORY_SIZE 100
@@ -175,6 +176,16 @@ static void charge_mode_update_final_weight(float new_weight) {
 
     last_final_weight = new_weight;
     last_charge_result = classify_charge(new_weight);
+
+    // La poudre arrivee en retard fait partie de la poudre "en vol" : on corrige l'apprentissage
+    // (seulement si la charge n'a pas eu de complement, sinon la poudre vient des impulsions).
+    eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
+    if (tuning->learning_enable && last_charge_topups == 0 && learned_samples > 0 && fabsf(delta) < 0.2f) {
+        learned_inflight = fminf(fmaxf(0.0f, learned_inflight + 0.3f * delta), tuning->learning_max_offset);
+        profile_extra_t * extra = profile_get_selected_extra();
+        extra->learned_inflight = learned_inflight;
+        profile_extra_data_save();
+    }
 
     // Met a jour la derniere entree de l'historique et le total de poudre
     if (charge_history_count > 0) {
@@ -373,11 +384,22 @@ typedef enum {
  * inferieur a "Set Point Accuracy (Standard Deviation)".
  * Retourne la moyenne de ces mesures dans *stable_weight.
  */
+// Le poids est considere stable seulement s'il n'a pas bouge pendant STABLE_WINDOW_MS :
+// une poudre qui tombe lentement (quelques grains par seconde) n'est plus prise pour un poids stable.
+#define STABLE_WINDOW_MS        1500
+#define STABLE_MAX_SAMPLES      64
+#define STABLE_MIN_RANGE        0.016f   // ~1 graduation de FX-120i en grains (scintillement toléré)
+#define STABLE_MAX_DRIFT        0.012f   // derive max entre debut et fin de fenetre (< 1 graduation)
+
 static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t timeout_ms) {
-    const size_t window = 5;
-    FloatRingBuffer data_buffer(window);
+    static float weights[STABLE_MAX_SAMPLES];
+    static TickType_t ticks[STABLE_MAX_SAMPLES];
+    size_t count = 0;
+
     TickType_t start_tick = xTaskGetTickCount();
     float last_weight = scale_get_current_measurement();
+    float sd_margin = charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin;
+    float max_range = fmaxf(2.0f * sd_margin, STABLE_MIN_RANGE);
 
     while (true) {
         ButtonEncoderEvent_t button_encoder_event = button_wait_for_input(false);
@@ -387,24 +409,62 @@ static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t ti
 
         float current_weight;
         if (scale_block_wait_for_next_measurement(200, &current_weight)) {
-            data_buffer.enqueue(current_weight);
+            TickType_t now = xTaskGetTickCount();
             last_weight = current_weight;
 
-            if (data_buffer.getCounter() >= window &&
-                data_buffer.getSd() < charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin) {
-                *stable_weight = data_buffer.getMean();
-                return SETTLE_STABLE;
+            // Ajoute la mesure (on retire la plus ancienne si le tableau est plein)
+            if (count == STABLE_MAX_SAMPLES) {
+                memmove(&weights[0], &weights[1], (STABLE_MAX_SAMPLES - 1) * sizeof(float));
+                memmove(&ticks[0], &ticks[1], (STABLE_MAX_SAMPLES - 1) * sizeof(TickType_t));
+                count -= 1;
+            }
+            weights[count] = current_weight;
+            ticks[count] = now;
+            count += 1;
+
+            // On ne garde que les mesures de la fenetre (en gardant celle qui couvre son debut)
+            size_t first = 0;
+            while (first + 1 < count &&
+                   (now - ticks[first + 1]) * portTICK_PERIOD_MS >= STABLE_WINDOW_MS) {
+                first += 1;
+            }
+            if (first > 0) {
+                memmove(&weights[0], &weights[first], (count - first) * sizeof(float));
+                memmove(&ticks[0], &ticks[first], (count - first) * sizeof(TickType_t));
+                count -= first;
+            }
+
+            uint32_t covered_ms = (now - ticks[0]) * portTICK_PERIOD_MS;
+            if (count >= 5 && covered_ms >= STABLE_WINDOW_MS) {
+                float w_min = weights[0], w_max = weights[0];
+                for (size_t i = 1; i < count; i++) {
+                    w_min = fminf(w_min, weights[i]);
+                    w_max = fmaxf(w_max, weights[i]);
+                }
+
+                // Moyenne du premier et du dernier tiers pour detecter une lente montee
+                size_t third = count / 3;
+                if (third < 1) {
+                    third = 1;
+                }
+                float head = 0.0f, tail = 0.0f;
+                for (size_t i = 0; i < third; i++) {
+                    head += weights[i];
+                    tail += weights[count - 1 - i];
+                }
+                head /= third;
+                tail /= third;
+
+                if ((w_max - w_min) <= max_range && fabsf(tail - head) <= STABLE_MAX_DRIFT) {
+                    *stable_weight = tail;
+                    return SETTLE_STABLE;
+                }
             }
         }
 
         uint32_t elapsed_ms = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
         if (elapsed_ms >= timeout_ms) {
-            if (data_buffer.getCounter() >= window) {
-                *stable_weight = data_buffer.getMean();
-            }
-            else {
-                *stable_weight = last_weight;
-            }
+            *stable_weight = last_weight;
             return SETTLE_TIMEOUT;
         }
     }
@@ -718,6 +778,8 @@ void charge_mode_wait_for_complete() {
         charge_mode_config.charge_mode_state = CHARGE_MODE_EXIT;
         return;
     }
+
+    last_charge_topups = topups_done;
 
     // Stop the timer
     TickType_t now = xTaskGetTickCount();
