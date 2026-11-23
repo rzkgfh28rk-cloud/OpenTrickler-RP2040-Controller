@@ -163,6 +163,37 @@ static charge_result_t classify_charge(float final_weight) {
 }
 
 
+// Variation minimale (en unite de la balance) pour corriger le resultat apres coup
+#define CUP_WATCH_MIN_CHANGE 0.015f
+
+static void charge_mode_apply_result_led(void);
+
+// Corrige le poids final de la derniere charge (poudre tombee apres la mesure)
+static void charge_mode_update_final_weight(float new_weight) {
+    float delta = new_weight - last_final_weight;
+    charge_result_t old_result = last_charge_result;
+
+    last_final_weight = new_weight;
+    last_charge_result = classify_charge(new_weight);
+
+    // Met a jour la derniere entree de l'historique et le total de poudre
+    if (charge_history_count > 0) {
+        uint32_t last_idx = (charge_history_head + CHARGE_HISTORY_SIZE - 1) % CHARGE_HISTORY_SIZE;
+        if (charge_history[last_idx].seq == charge_history_seq) {
+            charge_history[last_idx].final_weight = new_weight;
+            charge_history[last_idx].result = (uint8_t) last_charge_result;
+        }
+    }
+    if (total_powder_charges > 0) {
+        total_powder_weight += delta;
+    }
+
+    if (last_charge_result != old_result) {
+        charge_mode_apply_result_led();
+    }
+}
+
+
 // Configures
 TaskHandle_t scale_measurement_render_task_handler = NULL;
 static char title_string[30];
@@ -733,15 +764,8 @@ void charge_mode_wait_for_complete() {
     charge_mode_config.charge_mode_state = CHARGE_MODE_WAIT_FOR_CUP_REMOVAL;
 }
 
-void charge_mode_wait_for_cup_removal() {
-    // Update current status
-    snprintf(title_string, sizeof(title_string), "Remove Cup");
-
-    FloatRingBuffer data_buffer(5);
-
-    // Post charge analysis: le poids final stable a deja ete mesure (apres complement eventuel)
-    // et compare aux tolerances "Precision de charge".
-
+// Allume la LED et met a jour les drapeaux selon le resultat de la derniere charge
+static void charge_mode_apply_result_led(void) {
     // Update LED colour before moving to the next stage
     // Over charged
     if (last_charge_result == CHARGE_RESULT_OVER) {
@@ -753,6 +777,7 @@ void charge_mode_wait_for_cup_removal() {
         );
 
         // Set over charge
+        charge_mode_config.charge_mode_event &= ~CHARGE_MODE_EVENT_UNDER_CHARGE;
         charge_mode_config.charge_mode_event |= CHARGE_MODE_EVENT_OVER_CHARGE;
     }
     // Under charged : hors tolerance aussi -> meme couleur que la surcharge (rouge)
@@ -766,6 +791,7 @@ void charge_mode_wait_for_cup_removal() {
         );
 
         // Set under charge flag
+        charge_mode_config.charge_mode_event &= ~CHARGE_MODE_EVENT_OVER_CHARGE;
         charge_mode_config.charge_mode_event |= CHARGE_MODE_EVENT_UNDER_CHARGE;
 
     }
@@ -781,6 +807,19 @@ void charge_mode_wait_for_cup_removal() {
         // Clear over and under charge bit
         charge_mode_config.charge_mode_event &= ~(CHARGE_MODE_EVENT_UNDER_CHARGE | CHARGE_MODE_EVENT_OVER_CHARGE);
     }
+}
+
+
+void charge_mode_wait_for_cup_removal() {
+    // Update current status
+    snprintf(title_string, sizeof(title_string), "Remove Cup");
+
+    FloatRingBuffer data_buffer(5);
+
+    // Post charge analysis: le poids final stable a deja ete mesure (apres complement eventuel)
+    // et compare aux tolerances "Precision de charge".
+
+    charge_mode_apply_result_led();
 
     // Stop condition: 5 stable measurements in 300ms apart (1.5 seconds minimum)
     while (true) {
@@ -806,6 +845,16 @@ void charge_mode_wait_for_cup_removal() {
             if (data_buffer.getSd() < charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin && 
                 data_buffer.getMean() + 10 < charge_mode_config.eeprom_charge_mode_data.set_point_mean_margin){
                 break;
+            }
+
+            // Suivi du poids tant que la coupelle est sur le plateau : si de la poudre tombe en retard,
+            // le resultat (ecran, LED, historique) est corrige avec le vrai poids final.
+            float stable_mean = data_buffer.getMean();
+            if (has_last_result &&
+                data_buffer.getSd() < charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin &&
+                stable_mean > charge_mode_config.target_charge_weight * 0.5f &&
+                fabsf(stable_mean - last_final_weight) > CUP_WATCH_MIN_CHANGE) {
+                charge_mode_update_final_weight(stable_mean);
             }
         }
 
