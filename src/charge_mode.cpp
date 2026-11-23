@@ -151,13 +151,13 @@ static void charge_history_clear(void) {
 
 
 static charge_result_t classify_charge(float final_weight) {
-    const float eps = 0.0005f;  // Tolere les erreurs d'arrondi des flottants
+    const float eps = 0.0005f;  // Une charge pile a la limite (ex. +0,040 pour 0,040) compte comme bonne
     float deviation = final_weight - charge_mode_config.target_charge_weight;
 
-    if (deviation > charge_mode_config.eeprom_charge_tuning_data.tolerance_over - eps) {
+    if (deviation > charge_mode_config.eeprom_charge_tuning_data.tolerance_over + eps) {
         return CHARGE_RESULT_OVER;
     }
-    if (deviation < -(charge_mode_config.eeprom_charge_tuning_data.tolerance_under - eps)) {
+    if (deviation < -(charge_mode_config.eeprom_charge_tuning_data.tolerance_under + eps)) {
         return CHARGE_RESULT_UNDER;
     }
     return CHARGE_RESULT_OK;
@@ -384,22 +384,11 @@ typedef enum {
  * inferieur a "Set Point Accuracy (Standard Deviation)".
  * Retourne la moyenne de ces mesures dans *stable_weight.
  */
-// Le poids est considere stable seulement s'il n'a pas bouge pendant STABLE_WINDOW_MS :
-// une poudre qui tombe lentement (quelques grains par seconde) n'est plus prise pour un poids stable.
-#define STABLE_WINDOW_MS        1500
-#define STABLE_MAX_SAMPLES      64
-#define STABLE_MIN_RANGE        0.016f   // ~1 graduation de FX-120i en grains (scintillement toléré)
-#define STABLE_MAX_DRIFT        0.012f   // derive max entre debut et fin de fenetre (< 1 graduation)
-
 static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t timeout_ms) {
-    static float weights[STABLE_MAX_SAMPLES];
-    static TickType_t ticks[STABLE_MAX_SAMPLES];
-    size_t count = 0;
-
+    const size_t window = 5;
+    FloatRingBuffer data_buffer(window);
     TickType_t start_tick = xTaskGetTickCount();
     float last_weight = scale_get_current_measurement();
-    float sd_margin = charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin;
-    float max_range = fmaxf(2.0f * sd_margin, STABLE_MIN_RANGE);
 
     while (true) {
         ButtonEncoderEvent_t button_encoder_event = button_wait_for_input(false);
@@ -409,62 +398,24 @@ static settle_result_t wait_for_stable_weight(float * stable_weight, uint32_t ti
 
         float current_weight;
         if (scale_block_wait_for_next_measurement(200, &current_weight)) {
-            TickType_t now = xTaskGetTickCount();
+            data_buffer.enqueue(current_weight);
             last_weight = current_weight;
 
-            // Ajoute la mesure (on retire la plus ancienne si le tableau est plein)
-            if (count == STABLE_MAX_SAMPLES) {
-                memmove(&weights[0], &weights[1], (STABLE_MAX_SAMPLES - 1) * sizeof(float));
-                memmove(&ticks[0], &ticks[1], (STABLE_MAX_SAMPLES - 1) * sizeof(TickType_t));
-                count -= 1;
-            }
-            weights[count] = current_weight;
-            ticks[count] = now;
-            count += 1;
-
-            // On ne garde que les mesures de la fenetre (en gardant celle qui couvre son debut)
-            size_t first = 0;
-            while (first + 1 < count &&
-                   (now - ticks[first + 1]) * portTICK_PERIOD_MS >= STABLE_WINDOW_MS) {
-                first += 1;
-            }
-            if (first > 0) {
-                memmove(&weights[0], &weights[first], (count - first) * sizeof(float));
-                memmove(&ticks[0], &ticks[first], (count - first) * sizeof(TickType_t));
-                count -= first;
-            }
-
-            uint32_t covered_ms = (now - ticks[0]) * portTICK_PERIOD_MS;
-            if (count >= 5 && covered_ms >= STABLE_WINDOW_MS) {
-                float w_min = weights[0], w_max = weights[0];
-                for (size_t i = 1; i < count; i++) {
-                    w_min = fminf(w_min, weights[i]);
-                    w_max = fmaxf(w_max, weights[i]);
-                }
-
-                // Moyenne du premier et du dernier tiers pour detecter une lente montee
-                size_t third = count / 3;
-                if (third < 1) {
-                    third = 1;
-                }
-                float head = 0.0f, tail = 0.0f;
-                for (size_t i = 0; i < third; i++) {
-                    head += weights[i];
-                    tail += weights[count - 1 - i];
-                }
-                head /= third;
-                tail /= third;
-
-                if ((w_max - w_min) <= max_range && fabsf(tail - head) <= STABLE_MAX_DRIFT) {
-                    *stable_weight = tail;
-                    return SETTLE_STABLE;
-                }
+            if (data_buffer.getCounter() >= window &&
+                data_buffer.getSd() < charge_mode_config.eeprom_charge_mode_data.set_point_sd_margin) {
+                *stable_weight = data_buffer.getMean();
+                return SETTLE_STABLE;
             }
         }
 
         uint32_t elapsed_ms = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
         if (elapsed_ms >= timeout_ms) {
-            *stable_weight = last_weight;
+            if (data_buffer.getCounter() >= window) {
+                *stable_weight = data_buffer.getMean();
+            }
+            else {
+                *stable_weight = last_weight;
+            }
             return SETTLE_TIMEOUT;
         }
     }
@@ -511,10 +462,6 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
     if (tuning->topup_enable) {
         float topup_speed = tuning->topup_speed_rps > 0 ? tuning->topup_speed_rps : fine_min_speed;
         uint32_t fallback_pulse_ms = tuning->topup_min_pulse_ms;
-        // Le tube fin a recule a l'arret : il revient une seule fois avant la premiere impulsion,
-        // ne recule pas entre les impulsions, et recule une seule fois a la fin.
-        bool fine_retracted = extra->fine_retract_rev > 0;
-        bool fine_moved_forward = false;
 
         while (*topups_done < tuning->topup_max_attempts &&
                classify_charge(stable_weight) == CHARGE_RESULT_UNDER) {
@@ -542,12 +489,6 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             snprintf(title_string, sizeof(title_string), "Top-up %u/%lu",
                      (unsigned) *topups_done, (unsigned long) tuning->topup_max_attempts);
 
-            // Avant la premiere impulsion seulement : on ramene le tube fin en position
-            if (fine_retracted) {
-                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, extra->fine_retract_rev, extra->retract_speed_rps);
-                fine_retracted = false;
-                fine_moved_forward = true;
-            }
 
             // Impulsion du trickler fin
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, topup_speed);
@@ -580,10 +521,11 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             }
         }
 
-        // Fin des impulsions : un seul recul du tube fin
-        if (fine_moved_forward) {
-            motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
-        }
+    }
+
+    // Charge terminee (complement compris) : un seul recul du tube fin
+    if (extra->fine_retract_rev > 0) {
+        motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
     }
 
     last_final_weight = stable_weight;
@@ -710,9 +652,8 @@ void charge_mode_wait_for_complete() {
             if (should_coarse_trickler_move && extra->coarse_retract_rev > 0) {
                 motor_rotate_blocking(SELECT_COARSE_TRICKLER_MOTOR, -extra->coarse_retract_rev, extra->retract_speed_rps);
             }
-            if (extra->fine_retract_rev > 0) {
-                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
-            }
+            // Le tube fin ne recule pas ici : il reste au bord pour que les impulsions de complement
+            // soient regulieres. Il recule une seule fois a la fin (voir charge_mode_settle_and_topup).
             break;
         }
         stop_confirm_count = 0;

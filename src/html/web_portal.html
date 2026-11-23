@@ -2073,7 +2073,7 @@
         "/rest/profile_config|p11": "Vitesse minimale du trickler fin (tours/s). C'est aussi la vitesse des compléments automatiques si « Top-up Speed » vaut 0.",
         "/rest/profile_config|p12": "Vitesse maximale du trickler fin (tours/s).",
         "/rest/profile_config|p13": "Recul du tube principal quand il s'arrête, en tours (0,125 = 1/8 de tour). Retient la poudre au bord du tube pour qu'elle ne tombe pas après l'arrêt. 0 = désactivé.",
-        "/rest/profile_config|p14": "Recul du tube fin quand il s'arrête, en tours (0,125 = 1/8 de tour). Réduit la poudre « en vol » et donc les charges trop hautes. Le tube est ramené en position avant chaque complément. 0 = désactivé.",
+        "/rest/profile_config|p14": "Recul du tube fin en fin de charge, en tours (0,125 = 1/8 de tour). Il se fait une seule fois, après le complément éventuel, pour retenir la poudre au bord du tube pendant que vous retirez la coupelle. 0 = désactivé.",
         "/rest/profile_config|p15": "Vitesse de rotation pendant le recul (tours/s). Valeur conseillée : 0,5 à 2. Trop rapide peut projeter de la poudre.",
 
         // Charge Mode
@@ -2092,8 +2092,8 @@
         "/rest/charge_mode_config|c13": "Position de la servo gate quand le trickler principal s'arrête (0 = ouverte, 1 = fermée).",
 
         // Précision de charge
-        "/rest/charge_tuning_config|t0": "Tolérance au-dessus de la cible. Si la charge finale dépasse la cible de cette valeur ou plus, la LED est rouge. Exemple : 0,05 avec une cible de 24,00 → rouge à partir de 24,05.",
-        "/rest/charge_tuning_config|t1": "Tolérance en dessous de la cible. Si la charge finale est en dessous de la cible de cette valeur ou plus, la LED est rouge (et le complément automatique se déclenche). Exemple : 0,05 → rouge à 23,95 ou moins.",
+        "/rest/charge_tuning_config|t0": "Tolérance au-dessus de la cible. Si la charge finale dépasse la cible de plus que cette valeur, la LED est rouge. Exemple : 0,05 avec une cible de 24,00 → 24,05 est encore vert, rouge au-delà.",
+        "/rest/charge_tuning_config|t1": "Tolérance en dessous de la cible. Si la charge finale est en dessous de la cible de plus que cette valeur, la LED est rouge (et le complément automatique se déclenche). Exemple : 0,05 → 23,95 est encore vert, rouge en dessous.",
         "/rest/charge_tuning_config|t2": "Si la charge stabilisée est trop basse, le trickler fin donne de petites impulsions jusqu'à entrer dans la tolérance. Ne peut rien faire si la charge est trop haute.",
         "/rest/charge_tuning_config|t3": "Nombre maximum d'impulsions de complément par charge. Évite de tourner sans fin si la trémie est vide. Valeur conseillée : 5.",
         "/rest/charge_tuning_config|t4": "Vitesse du trickler fin pendant les compléments (tours/s). 0 = vitesse minimale du trickler fin du profil (conseillé).",
