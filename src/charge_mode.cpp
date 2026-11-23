@@ -451,6 +451,10 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
     if (tuning->topup_enable) {
         float topup_speed = tuning->topup_speed_rps > 0 ? tuning->topup_speed_rps : fine_min_speed;
         uint32_t fallback_pulse_ms = tuning->topup_min_pulse_ms;
+        // Le tube fin a recule a l'arret : il revient une seule fois avant la premiere impulsion,
+        // ne recule pas entre les impulsions, et recule une seule fois a la fin.
+        bool fine_retracted = extra->fine_retract_rev > 0;
+        bool fine_moved_forward = false;
 
         while (*topups_done < tuning->topup_max_attempts &&
                classify_charge(stable_weight) == CHARGE_RESULT_UNDER) {
@@ -478,20 +482,17 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             snprintf(title_string, sizeof(title_string), "Top-up %u/%lu",
                      (unsigned) *topups_done, (unsigned long) tuning->topup_max_attempts);
 
-            // Si le tube fin a recule, on le ramene d'abord en position
-            if (extra->fine_retract_rev > 0) {
+            // Avant la premiere impulsion seulement : on ramene le tube fin en position
+            if (fine_retracted) {
                 motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, extra->fine_retract_rev, extra->retract_speed_rps);
+                fine_retracted = false;
+                fine_moved_forward = true;
             }
 
             // Impulsion du trickler fin
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, topup_speed);
             vTaskDelay(pdMS_TO_TICKS(pulse_ms));
             motor_set_speed(SELECT_FINE_TRICKLER_MOTOR, 0);
-
-            // Puis recul a nouveau
-            if (extra->fine_retract_rev > 0) {
-                motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
-            }
             vTaskDelay(pdMS_TO_TICKS(300));
 
             float previous_weight = stable_weight;
@@ -517,6 +518,11 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
                 }
                 fallback_pulse_ms = pulse_ms * 2;
             }
+        }
+
+        // Fin des impulsions : un seul recul du tube fin
+        if (fine_moved_forward) {
+            motor_rotate_blocking(SELECT_FINE_TRICKLER_MOTOR, -extra->fine_retract_rev, extra->retract_speed_rps);
         }
     }
 
