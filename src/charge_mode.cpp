@@ -621,7 +621,7 @@ void charge_mode_wait_for_complete() {
         stop_confirm_count = 0;
 
         // Coarse trickler stop condition
-        else if (coarse_trickler_error <= 0 &&
+        if (coarse_trickler_error <= 0 &&
                  should_coarse_trickler_move) {
 
             should_coarse_trickler_move = false;
