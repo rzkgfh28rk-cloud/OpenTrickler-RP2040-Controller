@@ -469,9 +469,9 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
 
             float missing = target - stable_weight;
 
-            // On vise le bas de la marge (25 % au-dessus de la limite basse) : la poudre tombe
-            // par paquets, il vaut mieux entrer de justesse que depasser
-            float wanted = fmaxf(missing - 0.75f * tuning->tolerance_under, 0.25f * missing);
+            // On vise 60 % de la marge basse sous la cible (ex. -0,024 pour une tolerance de 0,04) :
+            // assez bas pour ne pas depasser, assez haut pour ne pas finir colle au bord
+            float wanted = fmaxf(missing - 0.6f * tuning->tolerance_under, 0.25f * missing);
 
             uint32_t pulse_ms;
             if (topup_rate_per_ms > 0) {
