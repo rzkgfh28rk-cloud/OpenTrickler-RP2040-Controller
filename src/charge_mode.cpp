@@ -181,7 +181,7 @@ static void charge_mode_update_final_weight(float new_weight) {
     // (seulement si la charge n'a pas eu de complement, sinon la poudre vient des impulsions).
     eeprom_charge_tuning_data_t * tuning = &charge_mode_config.eeprom_charge_tuning_data;
     if (tuning->learning_enable && last_charge_topups == 0 && learned_samples > 0 && fabsf(delta) < 0.2f) {
-        learned_inflight = fminf(fmaxf(0.0f, learned_inflight + 0.3f * delta), tuning->learning_max_offset);
+        learned_inflight = fminf(fmaxf(0.0f, learned_inflight + 0.12f * delta), tuning->learning_max_offset);
         profile_extra_t * extra = profile_get_selected_extra();
         extra->learned_inflight = learned_inflight;
         profile_extra_data_save();
@@ -452,7 +452,7 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
                 learned_inflight = inflight_sample;
             }
             else {
-                learned_inflight = 0.7f * learned_inflight + 0.3f * inflight_sample;
+                learned_inflight = 0.88f * learned_inflight + 0.12f * inflight_sample;
             }
             learned_samples += 1;
         }
@@ -462,14 +462,16 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
     if (tuning->topup_enable) {
         float topup_speed = tuning->topup_speed_rps > 0 ? tuning->topup_speed_rps : fine_min_speed;
         uint32_t fallback_pulse_ms = tuning->topup_min_pulse_ms;
+        uint32_t previous_pulse_ms = 0;
 
         while (*topups_done < tuning->topup_max_attempts &&
                classify_charge(stable_weight) == CHARGE_RESULT_UNDER) {
 
             float missing = target - stable_weight;
 
-            // On vise le milieu de la marge basse pour ne pas depasser
-            float wanted = fmaxf(missing - 0.5f * tuning->tolerance_under, 0.25f * missing);
+            // On vise le bas de la marge (25 % au-dessus de la limite basse) : la poudre tombe
+            // par paquets, il vaut mieux entrer de justesse que depasser
+            float wanted = fmaxf(missing - 0.75f * tuning->tolerance_under, 0.25f * missing);
 
             uint32_t pulse_ms;
             if (topup_rate_per_ms > 0) {
@@ -481,9 +483,14 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             if (pulse_ms < tuning->topup_min_pulse_ms) {
                 pulse_ms = tuning->topup_min_pulse_ms;
             }
+            // Une impulsion ne peut pas etre plus de 1,5 fois plus longue que la precedente
+            if (previous_pulse_ms > 0 && pulse_ms > previous_pulse_ms * 3 / 2) {
+                pulse_ms = previous_pulse_ms * 3 / 2;
+            }
             if (pulse_ms > tuning->topup_max_pulse_ms) {
                 pulse_ms = tuning->topup_max_pulse_ms;
             }
+            previous_pulse_ms = pulse_ms;
 
             *topups_done += 1;
             snprintf(title_string, sizeof(title_string), "Top-up %u/%lu",
@@ -506,18 +513,17 @@ static bool charge_mode_settle_and_topup(float weight_at_stop, float fine_min_sp
             if (gained > 0.005f) {
                 float rate_sample = gained / (float) pulse_ms;
                 if (topup_rate_per_ms > 0) {
-                    topup_rate_per_ms = 0.6f * topup_rate_per_ms + 0.4f * rate_sample;
+                    topup_rate_per_ms = 0.75f * topup_rate_per_ms + 0.25f * rate_sample;
                 }
                 else {
                     topup_rate_per_ms = rate_sample;
                 }
             }
             else {
-                // Rien n'est tombe : impulsion suivante plus longue
-                if (topup_rate_per_ms > 0) {
-                    topup_rate_per_ms *= 0.5f;
-                }
-                fallback_pulse_ms = pulse_ms * 2;
+                // Presque rien n'est tombe : la poudre est souvent au bord du tube et tombera
+                // avec la prochaine impulsion. On ne touche pas au debit appris ; l'impulsion
+                // suivante est seulement un peu plus longue (limitee a 1,5x ci-dessus).
+                fallback_pulse_ms = pulse_ms * 3 / 2;
             }
         }
 
